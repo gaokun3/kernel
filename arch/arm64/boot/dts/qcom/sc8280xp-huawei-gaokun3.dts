@@ -943,7 +943,7 @@
 		vddpcie0p9-supply = <&vreg_pmu_pcie_0p9>;
 		vddrfa0p8-supply = <&vreg_pmu_rfa_0p8>;
 		vddrfa1p2-supply = <&vreg_pmu_rfa_1p2>;
-		vddrfa1p8-supply = <&vreg_pmu_rfa_1p7>;
+		vddrfa1p7-supply = <&vreg_pmu_rfa_1p7>;
 
 		/* HACK: qmi-chip-id=18 */
 		qcom,calibration-variant = "NTM_TW220";
