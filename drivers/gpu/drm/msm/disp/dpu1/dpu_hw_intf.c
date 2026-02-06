@@ -185,6 +185,9 @@ static void dpu_hw_intf_setup_timing_engine(struct dpu_hw_intf *intf,
 	 *
 	 * For the compression mode in DP case, the p->width is already
 	 * adjusted in drm_mode_to_intf_timing_params().
+	 *
+	 * Round odd widebus widths up. Truncating a DSC width such as 267
+	 * pixels would shorten the data window and cause a FIFO underflow.
 	 */
 	if (p->compression_en && p->dce_bytes_per_line) {
 		if (p->wide_bus_en)
@@ -192,7 +195,7 @@ static void dpu_hw_intf_setup_timing_engine(struct dpu_hw_intf *intf,
 		else
 			data_width = DIV_ROUND_UP(p->dce_bytes_per_line, 3);
 	} else if (p->wide_bus_en && !dp_intf) {
-		data_width = p->width >> 1;
+		data_width = DIV_ROUND_UP(p->width, 2);
 	} else {
 		data_width = p->width;
 	}
