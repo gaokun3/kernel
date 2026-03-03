@@ -62,6 +62,7 @@ static const struct regulator_bulk_data himax_supplies[] = {
 	{ .supply = "vddi" },
 	{ .supply = "avdd" },
 	{ .supply = "avee" },
+	{ .supply = "bl" },
 };
 
 static inline struct himax *to_himax(struct drm_panel *panel)
