@@ -22,9 +22,9 @@
 
 #include <video/mipi_display.h>
 
-static bool enable_dsc;
+static bool enable_dsc = true;
 module_param(enable_dsc, bool, 0);
-MODULE_PARM_DESC(enable_dsc, "enable DSC on the panel (default: false)");
+MODULE_PARM_DESC(enable_dsc, "enable DSC on the panel (default: true)");
 
 struct himax {
 	struct drm_panel panel;
