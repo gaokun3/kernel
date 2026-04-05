@@ -2169,9 +2169,16 @@ int msm_dsi_host_xfer_prepare(struct mipi_dsi_host *host,
 	 * mdss interrupt is generated in mdp core clock domain
 	 * mdp clock need to be enabled to receive dsi interrupt
 	 */
-	pm_runtime_get_sync(&msm_host->pdev->dev);
-	cfg_hnd->ops->link_clk_set_rate(msm_host);
-	cfg_hnd->ops->link_clk_enable(msm_host);
+	/*
+	 * When video mode is streaming, clocks are already enabled and
+	 * OPP is set by the video enable path. Skip redundant clock ops
+	 * to avoid xfer_restore dropping OPP to 0 during active video.
+	 */
+	if (!(msm_host->power_on && msm_host->enabled)) {
+		pm_runtime_get_sync(&msm_host->pdev->dev);
+		cfg_hnd->ops->link_clk_set_rate(msm_host);
+		cfg_hnd->ops->link_clk_enable(msm_host);
+	}
 
 	/* TODO: vote for bus bandwidth */
 
@@ -2201,9 +2208,10 @@ void msm_dsi_host_xfer_restore(struct mipi_dsi_host *host,
 		dsi_set_tx_power_mode(1, msm_host);
 
 	/* TODO: unvote for bus bandwidth */
-
-	cfg_hnd->ops->link_clk_disable(msm_host);
-	pm_runtime_put(&msm_host->pdev->dev);
+	if (!(msm_host->power_on && msm_host->enabled)) {
+		cfg_hnd->ops->link_clk_disable(msm_host);
+		pm_runtime_put(&msm_host->pdev->dev);
+	}
 }
 
 int msm_dsi_host_cmd_tx(struct mipi_dsi_host *host,
