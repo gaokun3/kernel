@@ -1414,4 +1414,20 @@ config TOUCHSCREEN_HIMAX_HX83112B
 	  To compile this driver as a module, choose M here: the
 	  module will be called himax_hx83112b.
 
+config TOUCHSCREEN_HIMAX_HX83121A_SPI
+	tristate "Himax HX83121A SPI touchscreen driver"
+	depends on SPI
+	select DRM_PANEL_BRIDGE
+	help
+	  Say Y here to enable support for Himax HX83121A touchscreens
+	  connected over SPI.
+
+	  This driver provides a complete touch-processing pipeline with
+	  CMF filtering, IIR temporal smoothing, palm rejection, weighted
+	  centroid detection, and multi-touch tracking.
+
+	  If unsure, say N.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called himax_hx83121a_spi.
 endif
