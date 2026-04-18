@@ -780,6 +780,7 @@ static int gaokun_ec_probe(struct i2c_client *client)
 
 	ec->client = client;
 	i2c_set_clientdata(client, ec);
+	device_init_wakeup(dev, true);
 	BLOCKING_INIT_NOTIFIER_HEAD(&ec->notifier_list);
 
 	ec->enable_gpio = devm_gpiod_get_optional(dev, "enable",
