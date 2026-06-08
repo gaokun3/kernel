@@ -11,6 +11,7 @@
 
 /dts-v1/;
 
+#include <dt-bindings/clock/qcom,dsi-phy-28nm.h>
 #include <dt-bindings/iio/qcom,spmi-adc7-pm8350.h>
 #include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/input/gpio-keys.h>
@@ -21,6 +22,10 @@
 #include "sc8280xp.dtsi"
 #include "sc8280xp-pmics.dtsi"
 
+/delete-node/ &pil_video_mem;
+/delete-node/ &pil_nsp1_mem;
+/delete-node/ &remoteproc_nsp1;
+
 / {
 	chassis-type = "tablet";
 	model = "Matebook E Go";
@@ -29,23 +34,24 @@
 	aliases {
 		i2c4 = &i2c4;
 		i2c15 = &i2c15;
-		serial1 = &uart2;
+		serial0 = &uart2;
 	};
 
-	chosen {
-		#address-cells = <2>;
-		#size-cells = <2>;
-		ranges;
+	/* use it as a fallback */
+        chosen {
+                #address-cells = <2>;
+                #size-cells = <2>;
+                ranges;
 
-		framebuffer0: framebuffer@c6200000 {
-			compatible = "simple-framebuffer";
-			reg = <0x0 0xc6200000 0x0 0x02400000>;
-			width = <1600>;
-			height = <2560>;
-			stride = <(1600 * 4)>;
-			format = "a8r8g8b8";
-		};
-	};
+                framebuffer0: framebuffer@c6200000 {
+                        compatible = "simple-framebuffer";
+                        reg = <0x0 0xc6200000 0x0 (2560 * 1600 * 4)>;
+                        width = <1600>;
+                        height = <2560>;
+                        stride = <(1600 * 4)>;
+                        format = "a8r8g8b8";
+                };
+        };
 
 	wcd938x: audio-codec {
 		compatible = "qcom,wcd9380-codec";
@@ -87,7 +93,8 @@
 			linux,can-disable;
 			wakeup-source;
 		};
-
+/*
+		// FIXME: touchpad won't work after detaching
 		switch-mode {
 			label = "Tablet Mode Switch";
 			gpios = <&tlmm 26 GPIO_ACTIVE_HIGH>;
@@ -96,6 +103,52 @@
 			debounce-interval = <10>;
 			wakeup-source;
 		};
+*/	};
+
+	vreg_avdd_5p5: regulator-avdd-5p5 {
+		compatible = "regulator-fixed";
+
+		regulator-name = "vreg_avdd_5p5";
+		regulator-min-microvolt = <5500000>;
+		regulator-max-microvolt = <5500000>;
+
+		gpio = <&tlmm 52 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&avdd_reg_en>;
+
+		regulator-boot-on;
+	};
+
+	vreg_avee_5p5: regulator-avee-5p5 {
+		compatible = "regulator-fixed";
+
+		regulator-name = "vreg_avee_5p5";
+		regulator-min-microvolt = <5500000>;
+		regulator-max-microvolt = <5500000>;
+
+		gpio = <&tlmm 53 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&avee_reg_en>;
+
+		regulator-boot-on;
+	};
+
+	vreg_dsi_bl: regulator-dsi-bl {
+		compatible = "regulator-fixed";
+
+		regulator-name = "vreg_dsi_bl";
+
+		gpio = <&tlmm 0 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&bl_reg_en>;
+
+		regulator-boot-on;
 	};
 
 	vreg_misc_3p3: regulator-misc-3p3 {
@@ -158,11 +211,25 @@
 	};
 
 	reserved-memory {
+		gpu_mem: gpu-mem@8bf00000 {
+			reg = <0 0x8bf00000 0 0x2000>;
+			no-map;
+		};
+
+		iris_iova: iris-iova {
+			iommu-addresses = <&iris 0x0 0x0 0x0 0x25800000>;
+		};
+
 		linux,cma {
 			compatible = "shared-dma-pool";
 			size = <0x0 0x8000000>;
 			reusable;
 			linux,cma-default;
+		};
+
+		pil_video_mem: video-region@8c600000 {
+			reg = <0 0x8c600000 0 0x700000>;
+			no-map;
 		};
 	};
 
@@ -356,8 +423,8 @@
 
 		vreg_l2b: ldo2 {
 			regulator-name = "vreg_l2b";
-			regulator-min-microvolt = <1904000>;
-			regulator-max-microvolt = <1904000>;
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
 		};
 
@@ -382,13 +449,6 @@
 						   RPMH_REGULATOR_MODE_HPM>;
 		};
 
-		vreg_l5b: ldo5 {
-			regulator-name = "vreg_l5b";
-			regulator-min-microvolt = <1200000>;
-			regulator-max-microvolt = <1200000>;
-			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
-		};
-
 		vreg_l6b: ldo6 {
 			regulator-name = "vreg_l6b";
 			regulator-min-microvolt = <880000>;
@@ -398,21 +458,6 @@
 			regulator-allow-set-load;
 			regulator-allowed-modes = <RPMH_REGULATOR_MODE_LPM
 						   RPMH_REGULATOR_MODE_HPM>;
-		};
-
-		vreg_l7b: ldo7 {
-			regulator-name = "vreg_l7b";
-			regulator-min-microvolt = <1800000>;
-			regulator-max-microvolt = <1800000>;
-			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
-			regulator-boot-on;
-		};
-
-		vreg_l9b: ldo9 {
-			regulator-name = "vreg_l9b";
-			regulator-min-microvolt = <912000>;
-			regulator-max-microvolt = <912000>;
-			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
 		};
 	};
 
@@ -435,6 +480,8 @@
 			regulator-always-on;
 		};
 
+		/* s2c, s3c */
+
 		vreg_l1c: ldo1 {
 			regulator-name = "vreg_l1c";
 			regulator-min-microvolt = <1800000>;
@@ -444,13 +491,7 @@
 			regulator-allowed-modes = <RPMH_REGULATOR_MODE_LPM
 						   RPMH_REGULATOR_MODE_HPM>;
 		};
-
-		vreg_l2c: ldo2 {
-			regulator-name = "vreg_l2c";
-			regulator-min-microvolt = <1800000>;
-			regulator-max-microvolt = <1800000>;
-			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
-		};
+		/* l2c, l3c,... s13c */
 
 		vreg_l8c: ldo8 {
 			regulator-name = "vreg_l8c";
@@ -498,6 +539,7 @@
 		vdd-l6-l9-l10-supply = <&vreg_s12b>;
 		vdd-l8-supply = <&vreg_s12b>;
 
+		/* s10d, s11d, s12d */
 		vreg_l2d: ldo2 {
 			regulator-name = "vreg_l2d";
 			regulator-min-microvolt = <3072000>;
@@ -506,13 +548,6 @@
 			regulator-allow-set-load;
 			regulator-allowed-modes = <RPMH_REGULATOR_MODE_LPM
 						   RPMH_REGULATOR_MODE_HPM>;
-		};
-
-		vreg_l3d: ldo3 {
-			regulator-name = "vreg_l3d";
-			regulator-min-microvolt = <1200000>;
-			regulator-max-microvolt = <1200000>;
-			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
 		};
 
 		vreg_l4d: ldo4 {
@@ -564,7 +599,7 @@
 			regulator-allowed-modes = <RPMH_REGULATOR_MODE_LPM
 						   RPMH_REGULATOR_MODE_HPM>;
 		};
-
+/*
 		vreg_l10d: ldo10 {
 			regulator-name = "vreg_l10d";
 			regulator-min-microvolt = <912000>;
@@ -574,7 +609,11 @@
 			regulator-allowed-modes = <RPMH_REGULATOR_MODE_LPM
 						   RPMH_REGULATOR_MODE_HPM>;
 		};
+*/
 	};
+	/* pmr735a
+	 * "PPP_RESOURCE_ID_SMPS3_E" / s3e
+	 */
 };
 
 &dispcc0 {
@@ -595,34 +634,55 @@
 
 &gpu {
 	status = "okay";
-};
 
-&gpu_zap_shader {
-	firmware-name = "qcom/sc8280xp/HUAWEI/gaokun3/qcdxkmsuc8280.mbn";
+	zap-shader {
+		memory-region = <&gpu_mem>;
+		firmware-name = "qcom/sc8280xp/HUAWEI/gaokun3/qcdxkmsuc8280.mbn";
+	};
 };
 
 &i2c4 {
-	clock-frequency = <400000>;
+	clock-frequency = <1000000>;
 
 	pinctrl-0 = <&i2c4_default>;
 	pinctrl-names = "default";
 
 	status = "okay";
 
-	touchscreen@4f {
-		compatible = "hid-over-i2c";
-		reg = <0x4f>;
+	/* himax ic @48 @49, enable this bus for userspace i2c IO */
+};
 
-		hid-descr-addr = <0x1>;
+&spi6 {
+	pinctrl-0 = <&spi6_default>;
+	pinctrl-names = "default";
+
+	status = "okay";
+
+	touchscreen@0 {
+		compatible = "himax,hx83121a-ts";
+		reg = <0>;
+
+		// TODO: power supply, always on rencently
 		interrupts-extended = <&tlmm 175 IRQ_TYPE_LEVEL_LOW>;
+		reset-gpios = <&tlmm 99 GPIO_ACTIVE_LOW>;
 
-		vdd-supply = <&vreg_misc_3p3>;
-		vddl-supply = <&vreg_s10b>;
+		panel = <&panel>;
+
+		spi-max-frequency = <12000000>;
+
+		touchscreen-size-x = <2560>;
+		touchscreen-size-y = <1600>;
+
+		/*
+		 * internally handle invert first, two transformations are
+		 * non-comutative even if we can swap first.
+		 */
+		touchscreen-swapped-x-y;
+		touchscreen-inverted-x;
 
 		pinctrl-0 = <&ts0_default>;
 		pinctrl-names = "default";
 	};
-
 };
 
 &i2c15 {
@@ -637,7 +697,15 @@
 		compatible = "huawei,gaokun3-ec";
 		reg = <0x38>;
 
-		interrupts-extended = <&tlmm 107 IRQ_TYPE_LEVEL_LOW>;
+		interrupts-extended = <&pdc 215 IRQ_TYPE_LEVEL_LOW>;
+		enable-gpios = <&tlmm 173 GPIO_ACTIVE_HIGH>;
+		bat-gpios = <&tlmm 41 GPIO_ACTIVE_HIGH>;
+
+		// not stable yet, so comment out it
+		// wakeup-source;
+
+		pinctrl-0 = <&ec_default>;
+		pinctrl-names = "default";
 
 		#address-cells = <1>;
 		#size-cells = <0>;
@@ -647,7 +715,6 @@
 			reg = <0>;
 			power-role = "dual";
 			data-role = "dual";
-
 			ports {
 				#address-cells = <1>;
 				#size-cells = <0>;
@@ -655,7 +722,7 @@
 				port@0 {
 					reg = <0>;
 
-					ucsi0_hs_in: endpoint {
+					ucsi0_hs_in: endpoint { // highspeed, usb2.0, role_switch
 						remote-endpoint = <&usb_0_dwc3_hs>;
 					};
 				};
@@ -663,7 +730,7 @@
 				port@1 {
 					reg = <1>;
 
-					ucsi0_ss_in: endpoint {
+					ucsi0_ss_in: endpoint { // superspeed, usb3.0
 						remote-endpoint = <&usb_0_qmpphy_out>;
 					};
 				};
@@ -716,6 +783,13 @@
 	};
 };
 
+&iris {
+	firmware-name = "qcom/sc8280xp/HUAWEI/gaokun3/qcvss8280.mbn";
+	memory-region = <&pil_video_mem>, <&iris_iova>;
+
+	status = "okay";
+};
+
 &mdss0 {
 	status = "okay";
 };
@@ -725,7 +799,8 @@
 };
 
 &mdss0_dp0_out {
-	data-lanes = <0 1>;
+	data-lanes = <0 1 2 3>;
+	link-frequencies = /bits/ 64 <1620000000 2700000000 5400000000 8100000000>;
 	remote-endpoint = <&usb_0_qmpphy_dp_in>;
 };
 
@@ -734,8 +809,90 @@
 };
 
 &mdss0_dp1_out {
-	data-lanes = <0 1>;
+	data-lanes = <0 1 2 3>;
+	link-frequencies = /bits/ 64 <1620000000 2700000000 5400000000 8100000000>;
 	remote-endpoint = <&usb_1_qmpphy_dp_in>;
+};
+
+&mdss0_dsi0 {
+	vdda-supply = <&vreg_l3b>;
+
+	qcom,dual-dsi-mode;
+	qcom,master-dsi;
+	qcom,sync-dual-dsi;
+
+	status = "okay";
+
+	panel: panel@0 {
+		compatible = "csot,ppc357db1-4", "himax,hx83121a";
+		reg = <0>;
+
+		pinctrl-0 = <&disp_reset_n>, <&mdp_vsync_active>;
+		pinctrl-names = "default";
+
+		reset-gpios = <&tlmm 38 GPIO_ACTIVE_LOW>;
+
+		vddi-supply = <&vreg_l2b>;
+		avdd-supply = <&vreg_avdd_5p5>;
+		avee-supply = <&vreg_avee_5p5>;
+		bl-supply = <&vreg_dsi_bl>;
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			port@0 {
+				reg = <0>;
+
+				panel_in_0: endpoint {
+					remote-endpoint = <&mdss0_dsi0_out>;
+				};
+			};
+
+			port@1 {
+				reg = <1>;
+
+				panel_in_1: endpoint {
+					remote-endpoint = <&mdss0_dsi1_out>;
+				};
+			};
+		};
+	};
+};
+
+&mdss0_dsi0_out {
+	data-lanes = <0 1 2 3>;
+	remote-endpoint = <&panel_in_0>;
+};
+
+&mdss0_dsi0_phy {
+	vdds-supply = <&vreg_l6b>;
+
+	status = "okay";
+};
+
+&mdss0_dsi1 {
+	vdda-supply = <&vreg_l3b>;
+
+	qcom,dual-dsi-mode;
+	qcom,sync-dual-dsi;
+
+	status = "okay";
+
+	/* DSI1 is slave, so use DSI0 clocks */
+	assigned-clock-parents = <&mdss0_dsi0_phy DSI_BYTE_PLL_CLK>,
+				 <&mdss0_dsi0_phy DSI_PIXEL_PLL_CLK>;
+};
+
+&mdss0_dsi1_out {
+	data-lanes = <0 1 2 3>;
+	remote-endpoint = <&panel_in_1>;
+};
+
+&mdss0_dsi1_phy {
+	vdds-supply = <&vreg_l6b>;
+
+	status = "okay";
 };
 
 &pcie2a {
@@ -787,6 +944,9 @@
 		vddrfa0p8-supply = <&vreg_pmu_rfa_0p8>;
 		vddrfa1p2-supply = <&vreg_pmu_rfa_1p2>;
 		vddrfa1p8-supply = <&vreg_pmu_rfa_1p7>;
+
+		/* HACK: qmi-chip-id=18 */
+		qcom,calibration-variant = "NTM_TW220";
 	};
 };
 
@@ -971,13 +1131,18 @@
 	status = "okay";
 };
 
+&remoteproc_slpi {
+	firmware-name = "qcom/sc8280xp/HUAWEI/gaokun3/qcslpi8280.mbn";
+	status = "okay";
+};
+
 &rxmacro {
 	status = "okay";
 };
 
 &sound {
 	compatible = "qcom,sc8280xp-sndcard";
-	model = "SC8280XP-HUAWEI-MATEBOOKEGO";
+	model = "SC8280XP-HUAWEI-GAOKUN3";
 	audio-routing = "SpkrLeft IN", "WSA_SPK1 OUT",
 			"SpkrRight IN", "WSA_SPK2 OUT",
 			"IN1_HPHL", "HPHL_OUT",
@@ -1127,6 +1292,8 @@
 		vddrfa1p8-supply = <&vreg_pmu_rfa_1p7>;
 
 		max-speed = <3200000>;
+
+		local-bd-address = [ 00 11 22 33 44 55 ];
 	};
 };
 
@@ -1141,7 +1308,7 @@
 };
 
 &usb_0_hsphy {
-	vdda-pll-supply = <&vreg_l9d>;
+	vdda-pll-supply = <&vreg_l6d>;
 	vdda18-supply = <&vreg_l1c>;
 	vdda33-supply = <&vreg_l7d>;
 
@@ -1149,9 +1316,10 @@
 };
 
 &usb_0_qmpphy {
-	vdda-phy-supply = <&vreg_l9d>;
-	vdda-pll-supply = <&vreg_l4d>;
+	vdda-phy-supply = <&vreg_l4d>;
+	vdda-pll-supply = <&vreg_l9d>;
 
+	mode-switch;
 	orientation-switch;
 
 	status = "okay";
@@ -1176,7 +1344,7 @@
 };
 
 &usb_1_hsphy {
-	vdda-pll-supply = <&vreg_l4b>;
+	vdda-pll-supply = <&vreg_l6b>;
 	vdda18-supply = <&vreg_l1c>;
 	vdda33-supply = <&vreg_l13c>;
 
@@ -1184,8 +1352,8 @@
 };
 
 &usb_1_qmpphy {
-	vdda-phy-supply = <&vreg_l4b>;
-	vdda-pll-supply = <&vreg_l3b>;
+	vdda-phy-supply = <&vreg_l3b>;
+	vdda-pll-supply = <&vreg_l4b>;
 
 	orientation-switch;
 
@@ -1205,7 +1373,7 @@
 };
 
 &usb_2_hsphy0 {
-	vdda-pll-supply = <&vreg_l1b>;
+	vdda-pll-supply = <&vreg_l6d>;
 	vdda18-supply = <&vreg_l1c>;
 	vdda33-supply = <&vreg_l7d>;
 
@@ -1213,7 +1381,7 @@
 };
 
 &usb_2_hsphy1 {
-	vdda-pll-supply = <&vreg_l8d>;
+	vdda-pll-supply = <&vreg_l6d>;
 	vdda18-supply = <&vreg_l1c>;
 	vdda33-supply = <&vreg_l7d>;
 
@@ -1221,7 +1389,7 @@
 };
 
 &usb_2_hsphy2 {
-	vdda-pll-supply = <&vreg_l10d>;
+	vdda-pll-supply = <&vreg_l6d>;
 	vdda18-supply = <&vreg_l8c>;
 	vdda33-supply = <&vreg_l2d>;
 
@@ -1229,7 +1397,7 @@
 };
 
 &usb_2_hsphy3 {
-	vdda-pll-supply = <&vreg_l10d>;
+	vdda-pll-supply = <&vreg_l6d>;
 	vdda18-supply = <&vreg_l8c>;
 	vdda33-supply = <&vreg_l2d>;
 
@@ -1237,15 +1405,15 @@
 };
 
 &usb_2_qmpphy0 {
-	vdda-phy-supply = <&vreg_l1b>;
-	vdda-pll-supply = <&vreg_l4d>;
+	vdda-phy-supply = <&vreg_l4d>;
+	vdda-pll-supply = <&vreg_l1b>;
 
 	status = "okay";
 };
 
 &usb_2_qmpphy1 {
-	vdda-phy-supply = <&vreg_l8d>;
-	vdda-pll-supply = <&vreg_l4d>;
+	vdda-phy-supply = <&vreg_l4d>;
+	vdda-pll-supply = <&vreg_l8d>;
 
 	status = "okay";
 };
@@ -1316,8 +1484,28 @@
 };
 
 &tlmm {
+	gpio-reserved-ranges = <70 2>, <74 6>, <83 4>, <125 2>, <128 2>;
 
-	gpio-reserved-ranges = <70 2>, <74 6>, <83 4>, <125 2>, <128 2>, <154 4>;
+	avdd_reg_en: avdd-reg-en-state {
+		pins = "gpio52";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	avee_reg_en: avee-reg-en-state {
+		pins = "gpio53";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	bl_reg_en: bl-reg-en-state {
+		pins = "gpio0";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
 
 	bt_default: bt-default-state {
 		hstp-bt-en-pins {
@@ -1334,6 +1522,36 @@
 		};
 	};
 
+	disp_reset_n: disp-reset-n-state {
+		pins = "gpio38";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-up;
+	};
+
+	ec_default: ec-default-state {
+		int-n-pins {
+			pins = "gpio103";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-disable;
+		};
+
+		en-pins {
+			pins = "gpio173";
+			function = "gpio";
+			drive-strength = <4>;
+			bias-pull-down;
+		};
+
+		bat-pins {
+			pins = "gpio41";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-pull-down;
+		};
+	};
+
 	i2c4_default: i2c4-default-state {
 		pins = "gpio171", "gpio172";
 		function = "qup4";
@@ -1346,6 +1564,13 @@
 		function = "qup15";
 		drive-strength = <2>;
 		bias-pull-up;
+	};
+
+	mdp_vsync_active: mdss-te-state {
+		pins = "gpio8";
+		function = "mdp_vsync";
+		drive-strength = <2>;
+		bias-disable;
 	};
 
 	mode_pin_active: mode-pin-state {
@@ -1427,6 +1652,39 @@
 		};
 	};
 
+	spi6_default: spi6-default-state {
+		miso-n-pins {
+			pins = "gpio154";
+			function = "qup6";
+			drive-strength = <2>;
+			bias-pull-down;
+		};
+
+		mosi-n-pins {
+			pins = "gpio155";
+			function = "qup6";
+			drive-strength = <2>;
+			bias-pull-down;
+			output-high;
+		};
+
+		clk-n-pins {
+			pins = "gpio156";
+			function = "qup6";
+			drive-strength = <2>;
+			bias-pull-down;
+			output-high;
+		};
+
+		cs-n-pins {
+			pins = "gpio157";
+			function = "qup6";
+			drive-strength = <2>;
+			bias-pull-down;
+			output-high;
+		};
+	};
+
 	ts0_default: ts0-default-state {
 		int-n-pins {
 			pins = "gpio175";
@@ -1440,7 +1698,6 @@
 			function = "gpio";
 			drive-strength = <2>;
 			bias-disable;
-			output-high;
 		};
 	};
 
