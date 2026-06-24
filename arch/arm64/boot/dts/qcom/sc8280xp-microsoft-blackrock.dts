@@ -954,9 +954,6 @@
 };
 
 &uart2 {
-	pinctrl-0 = <&qup_uart2_default>;
-	pinctrl-names = "default";
-
 	status = "okay";
 
 	bluetooth {
