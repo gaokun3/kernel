@@ -161,6 +161,7 @@ enum platform_inst_fw_cap_type {
 	IR_PERIOD,
 	DISPLAY_DELAY_ENABLE,
 	DISPLAY_DELAY,
+	TIME_DELTA_BASED_RC,
 	INST_FW_CAP_MAX,
 };
 
