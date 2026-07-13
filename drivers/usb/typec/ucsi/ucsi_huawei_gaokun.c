@@ -188,8 +188,8 @@ static void gaokun_ucsi_update_connector(struct ucsi_connector *con)
 	con->typec_cap.orientation_aware = true;
 }
 
-static void gaokun_set_orientation(struct ucsi_connector *con,
-				   struct gaokun_ucsi_port *port)
+static int gaokun_set_orientation(struct ucsi_connector *con,
+				  struct gaokun_ucsi_port *port)
 {
 	enum gaokun_ucsi_ccx ccx;
 	unsigned long flags;
@@ -198,7 +198,7 @@ static void gaokun_set_orientation(struct ucsi_connector *con,
 	ccx = port->ccx;
 	spin_unlock_irqrestore(&port->lock, flags);
 
-	typec_set_orientation(con->port, CCX_TO_ORI(ccx));
+	return typec_set_orientation(con->port, CCX_TO_ORI(ccx));
 }
 
 static void gaokun_ucsi_connector_status(struct ucsi_connector *con)
@@ -212,7 +212,9 @@ static void gaokun_ucsi_connector_status(struct ucsi_connector *con)
 		return;
 	}
 
-	gaokun_set_orientation(con, &uec->ports[idx]);
+	if (gaokun_set_orientation(con, &uec->ports[idx]))
+		dev_warn(uec->dev, "failed to set orientation for connector %d\n",
+			 idx);
 }
 
 static const struct ucsi_operations gaokun_ucsi_ops = {
@@ -348,6 +350,7 @@ static unsigned long gaokun_ucsi_typec_mux_mode(u8 mode)
 static void gaokun_ucsi_handle_altmode(struct gaokun_ucsi_port *port)
 {
 	struct gaokun_ucsi *uec = port->ucsi;
+	struct ucsi_connector *con;
 	unsigned long flags;
 	u16 svid;
 	u8 mode;
@@ -367,6 +370,21 @@ static void gaokun_ucsi_handle_altmode(struct gaokun_ucsi_port *port)
 	hpd_state = port->hpd_state;
 	hpd_irq = port->hpd_irq;
 	spin_unlock_irqrestore(&port->lock, flags);
+
+	/*
+	 * The EC sideband status carries the CC orientation independently of
+	 * GET_CONNECTOR_STATUS. Keep the QMP switch in sync even when the PPM
+	 * command times out, otherwise DP link training can use the wrong lanes.
+	 */
+	if (uec->ucsi_registered && uec->ucsi->connector) {
+		con = &uec->ucsi->connector[idx];
+		if (con->port && gaokun_set_orientation(con, port)) {
+			dev_warn(uec->dev,
+				 "failed to set sideband orientation for port %d\n",
+				 idx);
+			return;
+		}
+	}
 
 	if (port->typec_mux && svid == USB_SID_DISPLAYPORT) {
 		port->state.mode = gaokun_ucsi_typec_mux_mode(mode);
