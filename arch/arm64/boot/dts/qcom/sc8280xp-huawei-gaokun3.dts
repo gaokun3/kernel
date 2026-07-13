@@ -212,6 +212,7 @@
 
 	reserved-memory {
 		iris_iova: iris-iova {
+			/* Reserve the address range used by the Gaokun3 video firmware. */
 			iommu-addresses = <&iris 0x0 0x0 0x0 0x25800000>;
 		};
 
@@ -222,6 +223,7 @@
 			linux,cma-default;
 		};
 
+		/* The Gaokun3 firmware layout places the video image here. */
 		pil_video_mem: video-region@8c600000 {
 			reg = <0 0x8c600000 0 0x700000>;
 			no-map;
