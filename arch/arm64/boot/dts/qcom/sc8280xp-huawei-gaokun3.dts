@@ -21,6 +21,7 @@
 
 #include "sc8280xp.dtsi"
 #include "sc8280xp-pmics.dtsi"
+#include "sc8280xp-huawei-gaokun3-front-camera.dtsi"
 
 /delete-node/ &pil_video_mem;
 /delete-node/ &pil_nsp1_mem;
