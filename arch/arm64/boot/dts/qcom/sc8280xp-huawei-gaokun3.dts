@@ -211,11 +211,6 @@
 	};
 
 	reserved-memory {
-		gpu_mem: gpu-mem@8bf00000 {
-			reg = <0 0x8bf00000 0 0x2000>;
-			no-map;
-		};
-
 		iris_iova: iris-iova {
 			iommu-addresses = <&iris 0x0 0x0 0x0 0x25800000>;
 		};
@@ -636,7 +631,7 @@
 	status = "okay";
 
 	zap-shader {
-		memory-region = <&gpu_mem>;
+		memory-region = <&pil_gpu_mem>;
 		firmware-name = "qcom/sc8280xp/HUAWEI/gaokun3/qcdxkmsuc8280.mbn";
 	};
 };
