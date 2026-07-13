@@ -431,9 +431,7 @@
 			regulator-max-microvolt = <1200000>;
 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
 			regulator-boot-on;
-			regulator-allow-set-load;
-			regulator-allowed-modes = <RPMH_REGULATOR_MODE_LPM
-						   RPMH_REGULATOR_MODE_HPM>;
+			/* LPM votes can block DisplayPort Alt Mode on this board. */
 		};
 
 		vreg_l4b: ldo4 {
@@ -441,9 +439,7 @@
 			regulator-min-microvolt = <912000>;
 			regulator-max-microvolt = <912000>;
 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
-			regulator-allow-set-load;
-			regulator-allowed-modes = <RPMH_REGULATOR_MODE_LPM
-						   RPMH_REGULATOR_MODE_HPM>;
+			/* LPM votes can block DisplayPort Alt Mode on this board. */
 		};
 
 		vreg_l6b: ldo6 {
@@ -552,9 +548,7 @@
 			regulator-min-microvolt = <1200000>;
 			regulator-max-microvolt = <1200000>;
 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
-			regulator-allow-set-load;
-			regulator-allowed-modes = <RPMH_REGULATOR_MODE_LPM
-						   RPMH_REGULATOR_MODE_HPM>;
+			/* LPM votes can block DisplayPort Alt Mode on this board. */
 		};
 
 		vreg_l6d: ldo6 {
@@ -592,9 +586,7 @@
 			regulator-min-microvolt = <912000>;
 			regulator-max-microvolt = <912000>;
 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
-			regulator-allow-set-load;
-			regulator-allowed-modes = <RPMH_REGULATOR_MODE_LPM
-						   RPMH_REGULATOR_MODE_HPM>;
+			/* LPM votes can block DisplayPort Alt Mode on this board. */
 		};
 /*
 		vreg_l10d: ldo10 {
@@ -1353,6 +1345,7 @@
 	vdda-phy-supply = <&vreg_l3b>;
 	vdda-pll-supply = <&vreg_l4b>;
 
+	mode-switch;
 	orientation-switch;
 
 	status = "okay";

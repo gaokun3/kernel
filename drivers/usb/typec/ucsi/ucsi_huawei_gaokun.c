@@ -91,6 +91,9 @@ struct gaokun_ucsi_port {
 	struct gaokun_ucsi *ucsi;
 	struct auxiliary_device *bridge;
 	struct typec_mux *typec_mux;
+	struct typec_mux_state state;
+	struct typec_altmode dp_alt;
+	struct typec_displayport_data dp_data;
 
 	int idx;
 	enum gaokun_ucsi_ccx ccx;
@@ -345,9 +348,6 @@ static unsigned long gaokun_ucsi_typec_mux_mode(u8 mode)
 static void gaokun_ucsi_handle_altmode(struct gaokun_ucsi_port *port)
 {
 	struct gaokun_ucsi *uec = port->ucsi;
-	struct typec_mux_state state = {};
-	struct typec_altmode dp_alt = {};
-	struct typec_displayport_data dp_data = {};
 	unsigned long flags;
 	u16 svid;
 	u8 mode;
@@ -369,24 +369,24 @@ static void gaokun_ucsi_handle_altmode(struct gaokun_ucsi_port *port)
 	spin_unlock_irqrestore(&port->lock, flags);
 
 	if (port->typec_mux && svid == USB_SID_DISPLAYPORT) {
-		state.mode = gaokun_ucsi_typec_mux_mode(mode);
-		dp_alt.svid = USB_TYPEC_DP_SID;
-		dp_alt.mode = USB_TYPEC_DP_MODE;
-		state.alt = &dp_alt;
+		port->state.mode = gaokun_ucsi_typec_mux_mode(mode);
+		port->dp_alt.svid = USB_TYPEC_DP_SID;
+		port->dp_alt.mode = USB_TYPEC_DP_MODE;
+		port->state.alt = &port->dp_alt;
 
-		dp_data.status = DP_STATUS_ENABLED;
+		port->dp_data.status = DP_STATUS_ENABLED;
 		if (hpd_state)
-			dp_data.status |= DP_STATUS_HPD_STATE;
+			port->dp_data.status |= DP_STATUS_HPD_STATE;
 		if (hpd_irq)
-			dp_data.status |= DP_STATUS_IRQ_HPD;
-		dp_data.conf = DP_CONF_SET_PIN_ASSIGN(mode);
-		state.data = &dp_data;
+			port->dp_data.status |= DP_STATUS_IRQ_HPD;
+		port->dp_data.conf = DP_CONF_SET_PIN_ASSIGN(mode);
+		port->state.data = &port->dp_data;
 
-		ret = typec_mux_set(port->typec_mux, &state);
+		ret = typec_mux_set(port->typec_mux, &port->state);
 		if (ret)
 			dev_warn(uec->dev,
 				 "failed to set typec mux for port %d: mode=0x%lx ret=%d\n",
-				 idx, state.mode, ret);
+				 idx, port->state.mode, ret);
 	}
 
 	/* UCSI callback .connector_status() have set orientation */
