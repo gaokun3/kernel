@@ -49,6 +49,13 @@ properties:
   iommus:
     maxItems: 1
 
+  memory-region:
+    minItems: 1
+    maxItems: 2
+    items:
+      - description: Reserved memory containing the video firmware
+      - description: Optional reservation in the Iris IOVA space
+
   interconnects:
     maxItems: 2
 
