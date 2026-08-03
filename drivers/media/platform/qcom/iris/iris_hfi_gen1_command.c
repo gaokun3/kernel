@@ -624,6 +624,8 @@ iris_hfi_gen1_packet_session_set_property(struct hfi_session_set_property_pkt *p
 		packet->shdr.hdr.size += sizeof(u32) + sizeof(*en);
 		break;
 	}
+	case HFI_PROPERTY_CONFIG_VENC_REQUEST_SYNC_FRAME:
+		break;
 	case HFI_PROPERTY_CONFIG_VENC_TARGET_BITRATE: {
 		struct hfi_bitrate *brate = prop_data;
 		u32 *in = pdata;
