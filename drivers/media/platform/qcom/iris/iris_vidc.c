@@ -288,6 +288,7 @@ int iris_close(struct file *filp)
 {
 	struct iris_inst *inst = iris_get_inst(filp);
 
+	iris_wait_for_sys_error(inst->core);
 	mutex_lock(&inst->lock);
 	inst->closing = true;
 	if (inst->seek_resume) {
