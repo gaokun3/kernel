@@ -1066,6 +1066,20 @@ void mhi_unregister_controller(struct mhi_controller *mhi_cntrl)
 	mhi_deinit_free_irq(mhi_cntrl);
 	mhi_destroy_debugfs(mhi_cntrl);
 
+	/* Images kept across power cycles when reuse_fw_images is set */
+	if (mhi_cntrl->fbc_image) {
+		mhi_free_bhie_table(mhi_cntrl, mhi_cntrl->fbc_image);
+		mhi_cntrl->fbc_image = NULL;
+	}
+	if (mhi_cntrl->rddm_image) {
+		mhi_free_bhie_table(mhi_cntrl, mhi_cntrl->rddm_image);
+		mhi_cntrl->rddm_image = NULL;
+	}
+	if (mhi_cntrl->bhi_image) {
+		mhi_free_bhi_buffer(mhi_cntrl, mhi_cntrl->bhi_image);
+		mhi_cntrl->bhi_image = NULL;
+	}
+
 	if (mhi_cntrl->edl_trigger)
 		sysfs_remove_file(&mhi_dev->dev.kobj, &dev_attr_trigger_edl.attr);
 
@@ -1159,15 +1173,18 @@ int mhi_prepare_for_power_up(struct mhi_controller *mhi_cntrl)
 			  4);
 		/*
 		 * Allocate RDDM table for debugging purpose if specified
+		 * (it is still there if reuse_fw_images kept it)
 		 */
-		mhi_alloc_bhie_table(mhi_cntrl, &mhi_cntrl->rddm_image,
-				     mhi_cntrl->rddm_size);
+		if (!mhi_cntrl->rddm_image)
+			mhi_alloc_bhie_table(mhi_cntrl, &mhi_cntrl->rddm_image,
+					     mhi_cntrl->rddm_size);
 		if (mhi_cntrl->rddm_image) {
 			ret = mhi_rddm_prepare(mhi_cntrl,
 					       mhi_cntrl->rddm_image);
 			if (ret) {
 				mhi_free_bhie_table(mhi_cntrl,
 						    mhi_cntrl->rddm_image);
+				mhi_cntrl->rddm_image = NULL;
 				goto error_reg_offset;
 			}
 		}
@@ -1189,6 +1206,9 @@ EXPORT_SYMBOL_GPL(mhi_prepare_for_power_up);
 
 void mhi_unprepare_after_power_down(struct mhi_controller *mhi_cntrl)
 {
+	if (mhi_cntrl->reuse_fw_images)
+		goto keep_images;
+
 	if (mhi_cntrl->fbc_image) {
 		mhi_free_bhie_table(mhi_cntrl, mhi_cntrl->fbc_image);
 		mhi_cntrl->fbc_image = NULL;
@@ -1199,6 +1219,7 @@ void mhi_unprepare_after_power_down(struct mhi_controller *mhi_cntrl)
 		mhi_cntrl->rddm_image = NULL;
 	}
 
+keep_images:
 	mhi_cntrl->bhi = NULL;
 	mhi_cntrl->bhie = NULL;
 

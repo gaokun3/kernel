@@ -327,6 +327,7 @@ struct mhi_controller_config {
  * @reg_len: Length of the MHI MMIO region (required)
  * @fbc_image: Points to firmware image buffer
  * @rddm_image: Points to RAM dump buffer
+ * @bhi_image: Cached BHI (SBL) buffer, only used if @reuse_fw_images is set
  * @mhi_chan: Points to the channel configuration table
  * @lpm_chans: List of channels that require LPM notifications
  * @irq: base irq # to request (required)
@@ -373,6 +374,10 @@ struct mhi_controller_config {
  * @index: Index of the MHI controller instance
  * @bounce_buf: Use of bounce buffer
  * @fbc_download: MHI host needs to do complete image transfer (optional)
+ * @reuse_fw_images: Keep the BHI / FBC / RDDM DMA buffers across power
+ *                   cycles and only free them in mhi_unregister_controller(),
+ *                   so that resume does not depend on high-order allocations
+ *                   succeeding (optional)
  * @wake_set: Device wakeup set flag
  * @irq_flags: irq flags passed to request_irq (optional)
  * @mru: the default MRU for the MHI device
@@ -403,6 +408,7 @@ struct mhi_controller {
 	size_t reg_len;
 	struct image_info *fbc_image;
 	struct image_info *rddm_image;
+	struct image_info *bhi_image;
 	struct mhi_chan *mhi_chan;
 	struct list_head lpm_chans;
 	int *irq;
@@ -458,6 +464,7 @@ struct mhi_controller {
 	int index;
 	bool bounce_buf;
 	bool fbc_download;
+	bool reuse_fw_images;
 	bool wake_set;
 	unsigned long irq_flags;
 	u32 mru;

@@ -382,6 +382,10 @@ int ath11k_mhi_register(struct ath11k_pci *ab_pci)
 	mhi_ctrl->sbl_size = SZ_512K;
 	mhi_ctrl->seg_len = SZ_512K;
 	mhi_ctrl->fbc_download = true;
+	/* Resume re-downloads the firmware: don't make it depend on finding
+	 * order-7 GFP_DMA blocks with compaction disabled (suspend gfp mask).
+	 */
+	mhi_ctrl->reuse_fw_images = true;
 	mhi_ctrl->runtime_get = ath11k_mhi_op_runtime_get;
 	mhi_ctrl->runtime_put = ath11k_mhi_op_runtime_put;
 	mhi_ctrl->status_cb = ath11k_mhi_op_status_cb;

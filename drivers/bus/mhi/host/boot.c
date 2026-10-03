@@ -302,8 +302,8 @@ invalid_pm_state:
 	return -EIO;
 }
 
-static void mhi_free_bhi_buffer(struct mhi_controller *mhi_cntrl,
-				struct image_info *image_info)
+void mhi_free_bhi_buffer(struct mhi_controller *mhi_cntrl,
+			 struct image_info *image_info)
 {
 	struct mhi_buf *mhi_buf = image_info->mhi_buf;
 
@@ -438,18 +438,28 @@ static enum mhi_fw_load_type mhi_fw_load_type_get(const struct mhi_controller *m
 
 static int mhi_load_image_bhi(struct mhi_controller *mhi_cntrl, const u8 *fw_data, size_t size)
 {
-	struct image_info *image;
+	struct image_info *image = mhi_cntrl->bhi_image;
 	int ret;
 
-	ret = mhi_alloc_bhi_buffer(mhi_cntrl, &image, size);
-	if (ret)
-		return ret;
+	if (image && image->mhi_buf->len != size) {
+		mhi_free_bhi_buffer(mhi_cntrl, image);
+		mhi_cntrl->bhi_image = image = NULL;
+	}
+
+	if (!image) {
+		ret = mhi_alloc_bhi_buffer(mhi_cntrl, &image, size);
+		if (ret)
+			return ret;
+	}
 
 	/* Load the firmware into BHI vec table */
 	memcpy(image->mhi_buf->buf, fw_data, size);
 
 	ret = mhi_fw_load_bhi(mhi_cntrl, &image->mhi_buf[image->entries - 1]);
-	mhi_free_bhi_buffer(mhi_cntrl, image);
+	if (mhi_cntrl->reuse_fw_images)
+		mhi_cntrl->bhi_image = image;
+	else
+		mhi_free_bhi_buffer(mhi_cntrl, image);
 
 	return ret;
 }
@@ -577,10 +587,26 @@ skip_req_fw:
 			fw_sz -= mhi_cntrl->sbl_size;
 		}
 
-		ret = mhi_alloc_bhie_table(mhi_cntrl, &mhi_cntrl->fbc_image, fw_sz);
-		if (ret) {
-			release_firmware(firmware);
-			goto error_fw_load;
+		/*
+		 * A table kept by reuse_fw_images is only reused if it has
+		 * exactly the segment count this image needs: the device reads
+		 * the whole vector table, so stale trailing entries must not
+		 * exist.
+		 */
+		if (mhi_cntrl->fbc_image &&
+		    mhi_cntrl->fbc_image->entries !=
+		    DIV_ROUND_UP(fw_sz, mhi_cntrl->seg_len) + 1) {
+			mhi_free_bhie_table(mhi_cntrl, mhi_cntrl->fbc_image);
+			mhi_cntrl->fbc_image = NULL;
+		}
+
+		if (!mhi_cntrl->fbc_image) {
+			ret = mhi_alloc_bhie_table(mhi_cntrl,
+						   &mhi_cntrl->fbc_image, fw_sz);
+			if (ret) {
+				release_firmware(firmware);
+				goto error_fw_load;
+			}
 		}
 
 		/* Load the firmware into BHIE vec table */

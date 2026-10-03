@@ -323,6 +323,8 @@ void mhi_create_devices(struct mhi_controller *mhi_cntrl);
 
 int mhi_alloc_bhie_table(struct mhi_controller *mhi_cntrl,
 			 struct image_info **image_info, size_t alloc_size);
+void mhi_free_bhi_buffer(struct mhi_controller *mhi_cntrl,
+			 struct image_info *image_info);
 void mhi_free_bhie_table(struct mhi_controller *mhi_cntrl,
 			 struct image_info *image_info);
 
