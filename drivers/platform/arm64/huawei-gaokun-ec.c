@@ -764,6 +764,32 @@ static irqreturn_t gaokun_ec_irq_handler(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
+/*
+ * 开机时盖子的状态。原实现只在 EC_EVENT_LID 事件里上报 SW_LID，注册时既不读
+ * 也不报，于是开机时盖子是合着的，输入层（和 Android 的 lid 逻辑）会一直以为
+ * 开着，直到下一次开合（1.0 计划 DISP-1）。读法与中断里的完全相同；放在申请
+ * 中断之前，lid_opened 不会和中断线程抢。读失败就保持原来的假设（开着）。
+ */
+static void gaokun_ec_report_initial_lid(struct gaokun_ec *ec)
+{
+	u8 status;
+	int ret;
+
+	ret = gaokun_ec_psy_read_byte(ec, EC_LID_STATE, &status);
+	if (ret) {
+		dev_warn(&ec->client->dev,
+			 "failed to read initial lid state (%d), assuming open\n", ret);
+		ec->lid_opened = true;
+		return;
+	}
+
+	ec->lid_opened = !!(status & EC_LID_OPEN);
+	input_report_switch(ec->idev, SW_LID, !ec->lid_opened);
+	input_sync(ec->idev);
+	dev_info(&ec->client->dev, "initial lid state: %s (0x%02x)\n",
+		 ec->lid_opened ? "open" : "closed", status);
+}
+
 static int gaokun_ec_probe(struct i2c_client *client)
 {
 	struct device *dev = &client->dev;
@@ -801,6 +827,8 @@ static int gaokun_ec_probe(struct i2c_client *client)
 	ret = input_register_device(ec->idev);
 	if (ret)
 		return dev_err_probe(dev, ret, "Failed to register input device\n");
+
+	gaokun_ec_report_initial_lid(ec);
 
 	ret = gaokun_aux_init(dev, GAOKUN_DEV_PSY, ec);
 	if (ret)
