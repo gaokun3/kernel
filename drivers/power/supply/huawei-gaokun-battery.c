@@ -31,6 +31,8 @@
 #define EC_BAT_CHARGING		BIT(1)
 #define EC_BAT_CRITICAL		BIT(2) /* Low Battery Level */
 #define EC_BAT_FULL		BIT(3)
+#define EC_BAT_STATUS_KNOWN	(EC_BAT_DISCHARGING | EC_BAT_CHARGING | \
+				 EC_BAT_CRITICAL | EC_BAT_FULL)
 
 /* -------------------------------------------------------------------------- */
 /* Word Data Reg */
@@ -81,6 +83,16 @@
 #define NO_DELAY_MODE	1
 #define DELAY_MODE	4
 
+/*
+ * EC 的 CRITICAL 位在多少电量置位，至今没有实测（1.0 计划 BATT-3）。如果它在
+ * 5% 以上就置位，直接拿它报 Critical 会让 Android 过早关机，所以只在电量
+ * 不高于这个值时才把它升级成 Critical；0 = 只在 0% 时才认它。
+ */
+static int critical_max_capacity = 2;
+module_param(critical_max_capacity, int, 0644);
+MODULE_PARM_DESC(critical_max_capacity,
+		 "Report CAPACITY_LEVEL Critical on the EC critical bit only at or below this capacity (%)");
+
 struct gaokun_psy_bat_status {
 	__le16 percentage_now;	/* 0x90 */
 	__le16 voltage_now;
@@ -118,6 +130,7 @@ struct gaokun_psy {
 	char battery_vendor[0x10];
 
 	int charge_now;
+	u8 bat_status_raw;	/* 0x82 最近一次读成功的原始值 */
 	int online;
 	int bat_present;
 };
@@ -216,25 +229,84 @@ static int gaokun_psy_get_bat_info(struct gaokun_psy *ecbat)
 					sizeof(ecbat->info), (u8 *)&ecbat->info);
 }
 
+/*
+ * 0x82 按位解码。它与 ACPI _BST 的 state 字段同构（bit0 放电、bit1 充电、
+ * bit2 电量危急），bit3 是 EC 自己的"充满"。原实现按整个字节精确匹配，
+ * 0x00（插着电但不充）和任何组合值（如 0x05 = 放电 + 危急）都只打一条警告、
+ * status 停在上一次的值 —— 于是"充电中"可以在电量一路下降时一直挂着。
+ *
+ * 优先级：放电位压过其他位（0x05 / 0x09 / 矛盾的 0x03 都报放电 —— 宁可让
+ * Android 的关机规则生效，也不要被一个过时的"充电中"挡住）；其次充满、充电；
+ * 一位都没有时，插着电报 NOT_CHARGING，没插电报放电。
+ */
+static int gaokun_psy_decode_bat_status(struct gaokun_psy *ecbat, u8 raw)
+{
+	if (raw & EC_BAT_DISCHARGING)
+		return POWER_SUPPLY_STATUS_DISCHARGING;
+	if (raw & EC_BAT_FULL)
+		return POWER_SUPPLY_STATUS_FULL;
+	if (raw & EC_BAT_CHARGING)
+		return POWER_SUPPLY_STATUS_CHARGING;
+
+	if (gaokun_psy_get_adp_status(ecbat))
+		return POWER_SUPPLY_STATUS_UNKNOWN;
+
+	return ecbat->online ? POWER_SUPPLY_STATUS_NOT_CHARGING :
+			       POWER_SUPPLY_STATUS_DISCHARGING;
+}
+
 static void gaokun_psy_update_bat_charge(struct gaokun_psy *ecbat)
 {
 	u8 charge;
 
-	gaokun_ec_psy_read_byte(ecbat->ec, EC_BAT_STATUS, &charge);
+	/* 读失败时 charge 是未初始化的栈变量，原实现照样拿去解码 */
+	if (gaokun_ec_psy_read_byte(ecbat->ec, EC_BAT_STATUS, &charge))
+		return;
 
-	switch (charge) {
-	case EC_BAT_CHARGING:
-		ecbat->charge_now = POWER_SUPPLY_STATUS_CHARGING;
-		break;
-	case EC_BAT_DISCHARGING:
-		ecbat->charge_now = POWER_SUPPLY_STATUS_DISCHARGING;
-		break;
-	case EC_BAT_FULL:
-		ecbat->charge_now = POWER_SUPPLY_STATUS_FULL;
-		break;
-	default:
-		dev_warn(ecbat->dev, "unknown charge state %d\n", charge);
-	}
+	if (charge & ~EC_BAT_STATUS_KNOWN)
+		dev_warn_once(ecbat->dev, "unknown charge state bits 0x%02x\n", charge);
+
+	ecbat->bat_status_raw = charge;
+	ecbat->charge_now = gaokun_psy_decode_bat_status(ecbat, charge);
+}
+
+/*
+ * Android 的 BatteryService.shouldShutdownLocked()（本机 services.jar 反汇编，
+ * 1.0 计划 BATT-1）：capacity_level 节点存在时【只】在它等于 Critical 时关机；
+ * 不存在时才退回"电量 <= 0 且 status 不是充电中"。所以一旦导出这个属性，
+ * 0% 关机就完全靠这里报 Critical，必须覆盖原规则的全部情形：
+ *
+ *   * 0%，且不是"EC 说在充、电流也确实为正" ⇒ Critical。这比原规则多出的
+ *     那一种 —— 插着电脑 USB 口这类弱电源，EC 报充电、电量照掉 —— 正是
+ *     BATT-1（09-14 那次没关机画面的断电）。
+ *   * EC 的 CRITICAL 位、电量不高于 critical_max_capacity ⇒ Critical
+ *     （同样排除"确实在充"），给 EC 自己的低电判断留一点余量（BATT-2）。
+ *
+ * ⚠️ current_now 的正负约定没有带负载实测过：2026-10-05 插着 Mac 的 USB 口、
+ *    status=Charging、电量 92% 时 7 次采样里 5 次为 +15…+106 mA、2 次为
+ *    -19 / -57 mA，与"正 = 流入电池"一致，但只是旁证（实测步骤见 BATT-1）。
+ *    约定若是反的：0% 接着真充电器会被报 Critical（多关一次机），弱电源下
+ *    掉到 0% 则仍不报（退回修之前的行为）—— 验收时两种都要看。
+ */
+static int gaokun_psy_capacity_level(struct gaokun_psy *ecbat)
+{
+	int cap = le16_to_cpu(ecbat->status.percentage_now);
+	int rate = (s16)le16_to_cpu(ecbat->status.rate_now);
+	u8 raw = ecbat->bat_status_raw;
+	bool gaining = (raw & EC_BAT_CHARGING) && !(raw & EC_BAT_DISCHARGING) &&
+		       rate > 0;
+
+	if (!gaining && (cap <= 0 ||
+			 ((raw & EC_BAT_CRITICAL) && cap <= critical_max_capacity)))
+		return POWER_SUPPLY_CAPACITY_LEVEL_CRITICAL;
+
+	if (ecbat->charge_now == POWER_SUPPLY_STATUS_FULL || cap >= 100)
+		return POWER_SUPPLY_CAPACITY_LEVEL_FULL;
+
+	if (raw & EC_BAT_CRITICAL)
+		return POWER_SUPPLY_CAPACITY_LEVEL_LOW;
+
+	return POWER_SUPPLY_CAPACITY_LEVEL_NORMAL;
 }
 
 static int gaokun_psy_get_bat_status(struct gaokun_psy *ecbat)
@@ -347,6 +419,10 @@ static int gaokun_psy_get_bat_property(struct power_supply *psy,
 		val->intval = le16_to_cpu(ecbat->status.percentage_now);
 		break;
 
+	case POWER_SUPPLY_PROP_CAPACITY_LEVEL:
+		val->intval = gaokun_psy_capacity_level(ecbat);
+		break;
+
 	case POWER_SUPPLY_PROP_MODEL_NAME:
 		val->strval = ecbat->battery_model;
 		break;
@@ -426,6 +502,7 @@ static enum power_supply_property gaokun_psy_bat_props[] = {
 	POWER_SUPPLY_PROP_CHARGE_CONTROL_START_THRESHOLD,
 	POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD,
 	POWER_SUPPLY_PROP_CAPACITY,
+	POWER_SUPPLY_PROP_CAPACITY_LEVEL,
 	POWER_SUPPLY_PROP_MODEL_NAME,
 	POWER_SUPPLY_PROP_MANUFACTURER,
 	POWER_SUPPLY_PROP_SERIAL_NUMBER,
@@ -549,9 +626,38 @@ static ssize_t smart_charge_delay_store(struct device *dev,
 
 static DEVICE_ATTR_RW(smart_charge_delay);
 
+/*
+ * ec_raw：只读，给实测用（1.0 计划 BATT-1/2 的放电采样、电池温度 LIVE-11/PERF-11）。
+ * 打出 0x82 的原始状态字节，以及三个含义未知的字：0x98、0x9C（状态块，随 _BST
+ * 每 2 秒读一次）和 0xA0（_BIX 块，事件时刷新）—— 都是驱动本来就在读的，不增加
+ * EC 事务。电池温度若在 EC 里，最可能就在这几个字中（例如以 0.1 K 为单位时约
+ * 2980），但这只是猜测，所以【不】据此导出 POWER_SUPPLY_PROP_TEMP：
+ * 报一个错的温度比报不出来更糟（温度高了会触发框架的过温关机）。
+ */
+static ssize_t ec_raw_show(struct device *dev, struct device_attribute *attr,
+			   char *buf)
+{
+	struct power_supply *psy = to_power_supply(dev);
+	struct gaokun_psy *ecbat = power_supply_get_drvdata(psy);
+
+	if (!gaokun_psy_bat_present(ecbat))
+		return -ENODEV;
+
+	gaokun_psy_get_bat_status(ecbat);
+
+	return sysfs_emit(buf, "status=0x%02x w98=0x%04x w9c=0x%04x wa0=0x%04x\n",
+			  ecbat->bat_status_raw,
+			  le16_to_cpu(ecbat->status.unknown1),
+			  le16_to_cpu(ecbat->status.unknown2),
+			  le16_to_cpu(ecbat->info.unknown3));
+}
+
+static DEVICE_ATTR_RO(ec_raw);
+
 static struct attribute *gaokun_psy_features_attrs[] = {
 	&dev_attr_battery_adaptive_charge.attr,
 	&dev_attr_smart_charge_delay.attr,
+	&dev_attr_ec_raw.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(gaokun_psy_features);
