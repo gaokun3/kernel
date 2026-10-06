@@ -32,6 +32,7 @@ enum iris_fmt_type_cap {
 };
 
 extern unsigned int iris_seek_mode;
+extern bool iris_eos_flush;
 
 /**
  * struct iris_inst - holds per video instance parameters
