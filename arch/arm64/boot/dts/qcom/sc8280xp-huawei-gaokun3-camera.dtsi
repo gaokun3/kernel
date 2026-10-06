@@ -122,15 +122,14 @@
 	status = "okay";
 
 	ports {
-		port@0 {
-			csiphy0_ep: endpoint@0 {
-				reg = <0>;
-
-				clock-lanes = <7>;
-				data-lanes = <0 1 2 3>;
-				remote-endpoint = <&s5k3l6_ep>;
-			};
-		};
+		/* port@0 (csiphy0 -> rear s5k3l6) removed: vdda(l2b) is held at
+		 * 1.8V by DSI vddi while S5K3L6 wants 2.8V - sensor NAKs on CCI
+		 * (i2c -6), and v7.2 camss iterates endpoints with
+		 * fwnode_graph_for_each_endpoint (no availability check), so a
+		 * wired-but-never-binding sensor blocks the whole v4l2-async
+		 * notifier - the front camera would get no /dev/v4l-subdev*
+		 * either. Shared-rail conflict needs board-level evidence.
+		 */
 
 		port@3 {
 			csiphy3_ep: endpoint@0 {
@@ -164,38 +163,7 @@
 	 *
 	 * This sensor has never been detected on 2023 model
 	 */
-	camera_rear: camera@10 {
-		compatible = "samsung,s5k3l6xx";
-		reg = <0x10>;
-
-		pinctrl-0 = <&camr_rgb_default>;
-		pinctrl-names = "default";
-
-		clocks = <&camcc CAMCC_MCLK4_CLK>;
-		clock-names = "mclk";
-		clock-frequency = <24000000>;
-
-		rstn-gpios = <&tlmm 7 GPIO_ACTIVE_LOW>;
-
-		vddio-supply = <&vreg_camr>;
-		vdda-supply = <&vreg_l2b>; // 2.8v
-		vddd-supply = <&vreg_l2c>; // 1.8v
-
-		leds = <&privacy_led>; // &camera_flash can't be enabled for now
-		led-names = "privacy";
-
-		lens-focus = <&voice_coil_motor>;
-
-		orientation = <1>;
-		rotation = <180>; /* FIXME */
-
-		port {
-			s5k3l6_ep: endpoint {
-				data-lanes = <1 2 3 4>;
-				remote-endpoint = <&csiphy0_ep>;
-			};
-		};
-	};
+	/* camera_rear (s5k3l6xx) removed - see camss port@0 note above */
 
 	// eeprom@50/51 <= l2c
 };
