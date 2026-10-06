@@ -214,7 +214,8 @@ static int iris_hfi_gen1_session_stop(struct iris_inst *inst, u32 plane)
 				inst->flush_responses_pending++;
 				ret = iris_wait_for_session_response(inst, true);
 			}
-		} else if (READ_ONCE(iris_seek_mode) == 1 && V4L2_TYPE_IS_OUTPUT(plane) &&
+		} else if (!inst->closing && READ_ONCE(iris_seek_mode) == 1 &&
+			   V4L2_TYPE_IS_OUTPUT(plane) &&
 			   inst->state == IRIS_INST_INPUT_STREAMING &&
 			   inst->sub_state & IRIS_INST_SUB_LOAD_RESOURCES) {
 			reinit_completion(&inst->flush_completion);

@@ -293,12 +293,13 @@ int iris_close(struct file *filp)
 
 	iris_wait_for_sys_error(inst->core);
 
+	mutex_lock(&inst->lock);
+	inst->closing = true;
 	if (inst->seek_resume) {
-		mutex_lock(&inst->lock);
 		inst->hfi_session_ops->session_stop(inst, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
 		inst->seek_resume = false;
-		mutex_unlock(&inst->lock);
 	}
+	mutex_unlock(&inst->lock);
 
 	v4l2_ctrl_handler_free(&inst->ctrl_handler);
 	v4l2_m2m_ctx_release(inst->m2m_ctx);
