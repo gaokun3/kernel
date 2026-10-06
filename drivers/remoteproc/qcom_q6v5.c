@@ -12,6 +12,7 @@
 #include <linux/interrupt.h>
 #include <linux/module.h>
 #include <linux/soc/qcom/qcom_aoss.h>
+#include <linux/ratelimit.h>
 #include <linux/soc/qcom/smem.h>
 #include <linux/soc/qcom/smem_state.h>
 #include <linux/remoteproc.h>
@@ -162,10 +163,18 @@ EXPORT_SYMBOL_GPL(qcom_q6v5_wait_for_start);
 
 static irqreturn_t q6v5_handover_interrupt(int irq, void *data)
 {
+	/*
+	 * A remote can assert this several times a second indefinitely. One
+	 * report a minute is plenty to notice it, and keeps the flood from
+	 * pushing a backtrace out of a pstore crash dump.
+	 */
+	static DEFINE_RATELIMIT_STATE(handover_rs, 60 * HZ, 1);
 	struct qcom_q6v5 *q6v5 = data;
 
 	if (q6v5->handover_issued) {
-		dev_err(q6v5->dev, "Handover signaled, but it already happened\n");
+		if (__ratelimit(&handover_rs))
+			dev_err(q6v5->dev,
+				"Handover signaled, but it already happened\n");
 		return IRQ_HANDLED;
 	}
 
