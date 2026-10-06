@@ -219,6 +219,14 @@
 		linux,cma {
 			compatible = "shared-dma-pool";
 			size = <0x0 0x8000000>;
+			/*
+			 * Keep the default CMA pool below 4 GiB: without this it is
+			 * allocated top-down at 0x878000000, where devices with a
+			 * 32-bit coherent mask (ath11k/MHI) cannot use it and fall
+			 * back to high-order ZONE_DMA buddy allocations on every
+			 * resume.
+			 */
+			alloc-ranges = <0x0 0x80000000 0x0 0x80000000>;
 			reusable;
 			linux,cma-default;
 		};
