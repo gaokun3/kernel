@@ -198,7 +198,17 @@ static int iris_hfi_gen1_session_stop(struct iris_inst *inst, u32 plane)
 			if (V4L2_TYPE_IS_OUTPUT(plane))
 				flush_type = HFI_FLUSH_ALL;
 			else if (V4L2_TYPE_IS_CAPTURE(plane))
-				flush_type = HFI_FLUSH_OUTPUT;
+				/*
+				 * Only a resolution change keeps the bitstream queued, so only
+				 * then flush the picture side alone. Any other CAPTURE streamoff
+				 * while streaming (stop, seek) drops the OUTPUT queue right after:
+				 * flush everything, as venus vdec_stop_capture() does. On sc8280xp
+				 * the firmware mostly never completes an HFI_FLUSH_OUTPUT sent
+				 * here, and then stops reading the command queue altogether.
+				 */
+				flush_type = inst->sub_state & (IRIS_INST_SUB_DRC |
+								IRIS_INST_SUB_DRC_LAST) ?
+					     HFI_FLUSH_OUTPUT : HFI_FLUSH_ALL;
 
 			reinit_completion(&inst->flush_completion);
 
