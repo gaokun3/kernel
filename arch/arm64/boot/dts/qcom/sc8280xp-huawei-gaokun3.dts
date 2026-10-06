@@ -1710,3 +1710,5 @@
 		bias-pull-down;
 	};
 };
+
+#include "sc8280xp-huawei-gaokun3-camera.dtsi"
