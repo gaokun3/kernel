@@ -119,6 +119,7 @@ struct iris_core {
 	struct completion			core_init_done;
 	struct completion			sys_error_done;
 	u32					intr_status;
+	bool					hw_powered;
 	struct delayed_work			sys_error_handler;
 	struct list_head			instances;
 	/* encoder and decoder have overlapping caps, so two different arrays are required */
