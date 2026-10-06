@@ -668,7 +668,7 @@ static struct clk_rcg2 camcc_camnoc_axi_clk_src = {
 		.name = "camcc_camnoc_axi_clk_src",
 		.parent_data = camcc_parent_data_2,
 		.num_parents = ARRAY_SIZE(camcc_parent_data_2),
-		.ops = &clk_rcg2_ops,
+		.ops = &clk_rcg2_shared_ops,
 	},
 };
 
@@ -836,7 +836,7 @@ static struct clk_rcg2 camcc_fast_ahb_clk_src = {
 		.name = "camcc_fast_ahb_clk_src",
 		.parent_data = camcc_parent_data_0,
 		.num_parents = ARRAY_SIZE(camcc_parent_data_0),
-		.ops = &clk_rcg2_ops,
+		.ops = &clk_rcg2_shared_ops,
 	},
 };
 
@@ -1371,7 +1371,7 @@ static struct clk_rcg2 camcc_slow_ahb_clk_src = {
 		.name = "camcc_slow_ahb_clk_src",
 		.parent_data = camcc_parent_data_0,
 		.num_parents = ARRAY_SIZE(camcc_parent_data_0),
-		.ops = &clk_rcg2_ops,
+		.ops = &clk_rcg2_shared_ops,
 	},
 };
 
