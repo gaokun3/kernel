@@ -116,6 +116,7 @@ struct iris_inst {
 	u32				codec;
 	bool				last_buffer_dequeued;
 	bool				seek_resume;
+	bool				closing;
 	u64				last_buf_ns;
 	u32				frame_counter;
 	u32				frame_rate;
