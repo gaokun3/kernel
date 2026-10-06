@@ -363,6 +363,10 @@ unsigned int iris_seek_mode = 1;
 module_param_named(seek_mode, iris_seek_mode, uint, 0644);
 MODULE_PARM_DESC(seek_mode, "Gen1 decoder seek: 1 flush and continue (default), 0 STOP and restart");
 
+bool iris_eos_flush;
+module_param_named(eos_flush, iris_eos_flush, bool, 0644);
+MODULE_PARM_DESC(eos_flush, "Flush Gen1 decoder output at EOS instead of retaining DPBs (default: N)");
+
 int iris_vdec_streamon_input(struct iris_inst *inst)
 {
 	int ret;
@@ -542,6 +546,11 @@ int iris_vdec_start_cmd(struct iris_inst *inst)
 		dev_err(inst->core->dev, "start called before receiving last_flag\n");
 		iris_inst_change_state(inst, IRIS_INST_ERROR);
 		return -EBUSY;
+	}
+
+	if (inst->core->iris_firmware_data == &iris_hfi_gen1_data) {
+		inst->last_buffer_dequeued = false;
+		v4l2_m2m_clear_state(inst->m2m_ctx);
 	}
 
 	return iris_inst_change_sub_state(inst, clear_sub_state, 0);

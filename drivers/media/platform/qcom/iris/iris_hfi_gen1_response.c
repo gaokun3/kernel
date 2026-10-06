@@ -428,14 +428,16 @@ static void iris_hfi_gen1_session_ftb_done(struct iris_inst *inst, void *packet)
 	}
 
 	if ((hfi_flags & HFI_BUFFERFLAG_EOS) && !filled_len) {
-		reinit_completion(&inst->flush_completion);
+		if (inst->domain != DECODER || READ_ONCE(iris_eos_flush)) {
+			reinit_completion(&inst->flush_completion);
 
-		flush_pkt.shdr.hdr.size = sizeof(struct hfi_session_flush_pkt);
-		flush_pkt.shdr.hdr.pkt_type = HFI_CMD_SESSION_FLUSH;
-		flush_pkt.shdr.session_id = inst->session_id;
-		flush_pkt.flush_type = HFI_FLUSH_OUTPUT;
-		if (!iris_hfi_queue_cmd_write(core, &flush_pkt, flush_pkt.shdr.hdr.size))
-			inst->flush_responses_pending++;
+			flush_pkt.shdr.hdr.size = sizeof(struct hfi_session_flush_pkt);
+			flush_pkt.shdr.hdr.pkt_type = HFI_CMD_SESSION_FLUSH;
+			flush_pkt.shdr.session_id = inst->session_id;
+			flush_pkt.flush_type = HFI_FLUSH_OUTPUT;
+			if (!iris_hfi_queue_cmd_write(core, &flush_pkt, flush_pkt.shdr.hdr.size))
+				inst->flush_responses_pending++;
+		}
 
 		iris_inst_sub_state_change_drain_last(inst);
 	}
