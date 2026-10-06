@@ -3,6 +3,7 @@
  * Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
+#include <linux/moduleparam.h>
 #include <media/v4l2-event.h>
 #include <media/v4l2-mem2mem.h>
 
@@ -358,9 +359,21 @@ void iris_vdec_src_change(struct iris_inst *inst)
 	v4l2_event_queue_fh(&inst->fh, &event);
 }
 
+unsigned int iris_seek_mode = 1;
+module_param_named(seek_mode, iris_seek_mode, uint, 0644);
+MODULE_PARM_DESC(seek_mode, "Gen1 decoder seek: 1 flush and continue (default), 0 STOP and restart");
+
 int iris_vdec_streamon_input(struct iris_inst *inst)
 {
 	int ret;
+
+	if (inst->seek_resume) {
+		inst->frame_counter = 0;
+		ret = iris_process_streamon_input(inst);
+		if (!ret && inst->state == IRIS_INST_STREAMING)
+			inst->seek_resume = false;
+		return ret;
+	}
 
 	ret = iris_set_properties(inst, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
 	if (ret)
@@ -394,9 +407,11 @@ int iris_vdec_streamon_output(struct iris_inst *inst)
 	const struct iris_hfi_session_ops *hfi_ops = inst->hfi_session_ops;
 	int ret;
 
-	ret = hfi_ops->session_set_config_params(inst, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
-	if (ret)
-		return ret;
+	if (!inst->seek_resume) {
+		ret = hfi_ops->session_set_config_params(inst, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
+		if (ret)
+			return ret;
+	}
 
 	iris_get_internal_buffers(inst, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
 
@@ -415,6 +430,9 @@ int iris_vdec_streamon_output(struct iris_inst *inst)
 	ret = iris_queue_internal_buffers(inst, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
 	if (ret)
 		goto error;
+
+	if (inst->state == IRIS_INST_STREAMING)
+		inst->seek_resume = false;
 
 	return ret;
 

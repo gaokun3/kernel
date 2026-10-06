@@ -198,16 +198,8 @@ static int iris_hfi_gen1_session_stop(struct iris_inst *inst, u32 plane)
 			if (V4L2_TYPE_IS_OUTPUT(plane))
 				flush_type = HFI_FLUSH_ALL;
 			else if (V4L2_TYPE_IS_CAPTURE(plane))
-				/*
-				 * Only a resolution change keeps the bitstream queued, so only
-				 * then flush the picture side alone. Any other CAPTURE streamoff
-				 * while streaming (stop, seek) drops the OUTPUT queue right after:
-				 * flush everything, as venus vdec_stop_capture() does. On sc8280xp
-				 * the firmware mostly never completes an HFI_FLUSH_OUTPUT sent
-				 * here, and then stops reading the command queue altogether.
-				 */
 				flush_type = inst->sub_state & (IRIS_INST_SUB_DRC |
-								IRIS_INST_SUB_DRC_LAST) ?
+							       IRIS_INST_SUB_DRC_LAST) ?
 					     HFI_FLUSH_OUTPUT : HFI_FLUSH_ALL;
 
 			reinit_completion(&inst->flush_completion);
@@ -222,7 +214,25 @@ static int iris_hfi_gen1_session_stop(struct iris_inst *inst, u32 plane)
 				inst->flush_responses_pending++;
 				ret = iris_wait_for_session_response(inst, true);
 			}
+		} else if (READ_ONCE(iris_seek_mode) == 1 && V4L2_TYPE_IS_OUTPUT(plane) &&
+			   inst->state == IRIS_INST_INPUT_STREAMING &&
+			   inst->sub_state & IRIS_INST_SUB_LOAD_RESOURCES) {
+			reinit_completion(&inst->flush_completion);
+
+			flush_pkt.shdr.hdr.size = sizeof(struct hfi_session_flush_pkt);
+			flush_pkt.shdr.hdr.pkt_type = HFI_CMD_SESSION_FLUSH;
+			flush_pkt.shdr.session_id = inst->session_id;
+			flush_pkt.flush_type = HFI_FLUSH_ALL;
+
+			ret = iris_hfi_queue_cmd_write(core, &flush_pkt, flush_pkt.shdr.hdr.size);
+			if (!ret) {
+				inst->flush_responses_pending++;
+				ret = iris_wait_for_session_response(inst, true);
+			}
+			if (!ret)
+				inst->seek_resume = true;
 		} else if (inst->sub_state & IRIS_INST_SUB_LOAD_RESOURCES) {
+			inst->seek_resume = false;
 			reinit_completion(&inst->completion);
 			iris_hfi_gen1_packet_session_cmd(inst, &pkt, HFI_CMD_SESSION_STOP);
 			ret = iris_hfi_queue_cmd_write(core, &pkt, pkt.shdr.hdr.size);

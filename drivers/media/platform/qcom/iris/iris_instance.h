@@ -31,6 +31,8 @@ enum iris_fmt_type_cap {
 	IRIS_FMT_QC10C,
 };
 
+extern unsigned int iris_seek_mode;
+
 /**
  * struct iris_inst - holds per video instance parameters
  *
@@ -112,6 +114,7 @@ struct iris_inst {
 	u32				metadata_idx;
 	u32				codec;
 	bool				last_buffer_dequeued;
+	bool				seek_resume;
 	u64				last_buf_ns;
 	u32				frame_counter;
 	u32				frame_rate;
