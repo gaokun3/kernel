@@ -39,14 +39,28 @@ static int sc8280xp_snd_init(struct snd_soc_pcm_runtime *rtd)
 	case WSA_CODEC_DMA_RX_0:
 	case WSA_CODEC_DMA_RX_1:
 		/*
-		 * Set limit of -3 dB on Digital Volume and 0 dB on PA Volume
-		 * to reduce the risk of speaker damage until we have active
-		 * speaker protection in place.
+		 * Upstream caps this at -3 dB digital and 0 dB PA "to reduce
+		 * the risk of speaker damage until we have active speaker
+		 * protection in place". Retuned for this machine, where the
+		 * two stages were measured rather than assumed:
+		 *
+		 * Digital is capped at unity (84) instead of -3 dB (81). The
+		 * scale is value - 84 dB, so anything above 84 borrows from
+		 * digital headroom -- at +6 dB, -6 dBFS content lands exactly
+		 * on 0 dBFS and THD measures -20 dB. Unity is the highest
+		 * setting that cannot clip.
+		 *
+		 * PA is capped at +9 dB (23) instead of 0 dB (17). It is
+		 * post-DAC, so it costs no digital headroom, and it is the
+		 * only stage that can add level without clipping. Its TLV is
+		 * flat at -3 dB over 0..14 and then 1.50 dB per step; that was
+		 * confirmed on hardware (15 -> 16 -> 17 measured +1.55 and
+		 * +1.43 dB), so 21 is +6 dB and 23 is +9 dB.
 		 */
-		snd_soc_limit_volume(card, "WSA_RX0 Digital Volume", 81);
-		snd_soc_limit_volume(card, "WSA_RX1 Digital Volume", 81);
-		snd_soc_limit_volume(card, "SpkrLeft PA Volume", 17);
-		snd_soc_limit_volume(card, "SpkrRight PA Volume", 17);
+		snd_soc_limit_volume(card, "WSA_RX0 Digital Volume", 84);
+		snd_soc_limit_volume(card, "WSA_RX1 Digital Volume", 84);
+		snd_soc_limit_volume(card, "SpkrLeft PA Volume", 23);
+		snd_soc_limit_volume(card, "SpkrRight PA Volume", 23);
 		break;
 	case DISPLAY_PORT_RX_0:
 		/* DISPLAY_PORT dai ids are not contiguous */
