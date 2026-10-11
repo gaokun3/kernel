@@ -629,9 +629,22 @@ static int gaokun_ec_suspend(struct device *dev)
 	if (ec->suspended)
 		return 0;
 
+	/*
+	 * The handler cannot read the EC in standby, and the IRQ is level
+	 * triggered: it would fire again as soon as the handler returned.
+	 * Keep it disabled until resume. An event raised meanwhile keeps the
+	 * line asserted, and the handler reads it once resume enables the
+	 * IRQ again. As a wakeup IRQ it still wakes the system: the PDC has
+	 * the irq core enable disabled wakeup IRQs for suspend
+	 * (IRQCHIP_ENABLE_WAKEUP_ON_SUSPEND).
+	 */
+	disable_irq(ec->client->irq);
+
 	ret = gaokun_ec_write(ec, ec_req);
-	if (ret)
+	if (ret) {
+		enable_irq(ec->client->irq);
 		return ret;
+	}
 
 	msleep(100);
 	gpiod_set_value(ec->enable_gpio, 0);
@@ -671,6 +684,7 @@ static int gaokun_ec_resume(struct device *dev)
 	ec->lid_opened = true;
 
 	ec->suspended = false;
+	enable_irq(ec->client->irq);
 
 	return 0;
 }
@@ -734,10 +748,6 @@ static irqreturn_t gaokun_ec_irq_handler(int irq, void *data)
 	u8 ec_req[] = MKREQ(EC_EVENT, EC_QUERY, 0);
 	u8 status, id;
 	int ret;
-
-	/* EC IO here before resume will fail at the first time, so ignore it */
-	if (ec->suspended)
-		return IRQ_HANDLED;
 
 	ret = gaokun_ec_read_byte(ec, ec_req, &id);
 	if (ret)
