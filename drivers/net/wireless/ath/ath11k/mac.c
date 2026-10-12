@@ -8631,7 +8631,8 @@ static int ath11k_mac_flush_tx_complete(struct ath11k *ar)
 	int ret = 0;
 
 	time_left = wait_event_timeout(ar->dp.tx_empty_waitq,
-				       (atomic_read(&ar->dp.num_tx_pending) == 0),
+				       (atomic_read(&ar->dp.num_tx_pending) == 0) ||
+				       test_bit(ATH11K_FLAG_CRASH_FLUSH, &ar->ab->dev_flags),
 				       ATH11K_FLUSH_TIMEOUT);
 	if (time_left == 0) {
 		ath11k_warn(ar->ab, "failed to flush transmit queue, data pkts pending %d\n",
@@ -8640,7 +8641,8 @@ static int ath11k_mac_flush_tx_complete(struct ath11k *ar)
 	}
 
 	time_left = wait_event_timeout(ar->txmgmt_empty_waitq,
-				       (atomic_read(&ar->num_pending_mgmt_tx) == 0),
+				       (atomic_read(&ar->num_pending_mgmt_tx) == 0) ||
+				       test_bit(ATH11K_FLAG_CRASH_FLUSH, &ar->ab->dev_flags),
 				       ATH11K_FLUSH_TIMEOUT);
 	if (time_left == 0) {
 		ath11k_warn(ar->ab, "failed to flush mgmt transmit queue, mgmt pkts pending %d\n",
@@ -9291,6 +9293,7 @@ ath11k_mac_op_reconfig_complete(struct ieee80211_hw *hw,
 				complete(&ab->reset_complete);
 				ab->is_reset = false;
 				atomic_set(&ab->fail_cont_count, 0);
+				__pm_relax(ab->recovery_ws);
 				ath11k_dbg(ab, ATH11K_DBG_BOOT, "reset success\n");
 			}
 		}

@@ -671,6 +671,30 @@ static int ath11k_wow_set_keepalive(struct ath11k *ar,
 	return 0;
 }
 
+static void ath11k_wow_suspend_crashed(struct ath11k *ar)
+{
+	struct ath11k_base *ab = ar->ab;
+
+	timer_delete_sync(&ab->mon_reap_timer);
+	ath11k_ce_stop_shadow_timers(ab);
+	ath11k_dp_stop_shadow_timers(ab);
+
+	if (test_bit(ATH11K_FLAG_EXT_IRQ_ENABLED, &ab->dev_flags))
+		ath11k_hif_irq_disable(ab);
+	if (test_bit(ATH11K_FLAG_CE_IRQ_ENABLED, &ab->dev_flags))
+		ath11k_hif_ce_irq_disable(ab);
+}
+
+static void ath11k_wow_resume_crashed(struct ath11k *ar)
+{
+	struct ath11k_base *ab = ar->ab;
+
+	if (!test_bit(ATH11K_FLAG_CE_IRQ_ENABLED, &ab->dev_flags))
+		ath11k_hif_ce_irq_enable(ab);
+	if (!test_bit(ATH11K_FLAG_EXT_IRQ_ENABLED, &ab->dev_flags))
+		ath11k_hif_irq_enable(ab);
+}
+
 int ath11k_wow_op_suspend(struct ieee80211_hw *hw,
 			  struct cfg80211_wowlan *wowlan)
 {
@@ -771,6 +795,12 @@ cleanup:
 	ath11k_wow_cleanup(ar);
 
 exit:
+	if (ret && test_bit(ATH11K_FLAG_CRASH_PENDING, &ar->ab->dev_flags)) {
+		ath11k_warn(ar->ab, "firmware crashed, suspending to restart it on resume\n");
+		ath11k_wow_suspend_crashed(ar);
+		ret = 0;
+	}
+
 	mutex_unlock(&ar->conf_mutex);
 	return ret ? 1 : 0;
 }
@@ -787,9 +817,12 @@ void ath11k_wow_op_set_wakeup(struct ieee80211_hw *hw, bool enabled)
 int ath11k_wow_op_resume(struct ieee80211_hw *hw)
 {
 	struct ath11k *ar = hw->priv;
-	int ret;
+	int ret = 0;
 
 	mutex_lock(&ar->conf_mutex);
+
+	if (test_bit(ATH11K_FLAG_CRASH_PENDING, &ar->ab->dev_flags))
+		goto exit;
 
 	ret = ath11k_hif_resume(ar->ab);
 	if (ret) {
@@ -840,6 +873,12 @@ int ath11k_wow_op_resume(struct ieee80211_hw *hw)
 	}
 
 exit:
+	if (test_bit(ATH11K_FLAG_CRASH_PENDING, &ar->ab->dev_flags)) {
+		ath11k_warn(ar->ab, "firmware crashed, restarting it after resume\n");
+		ath11k_wow_resume_crashed(ar);
+		ret = 0;
+	}
+
 	if (ret) {
 		switch (ar->state) {
 		case ATH11K_STATE_ON:

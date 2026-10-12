@@ -1304,6 +1304,7 @@ int ath11k_core_resume_early(struct ath11k_base *ab)
 		return 0;
 
 	reinit_completion(&ab->restart_completed);
+	clear_bit(ATH11K_FLAG_CRASH_PENDING, &ab->dev_flags);
 	ret = ath11k_hif_power_up(ab);
 	if (ret)
 		ath11k_warn(ab, "failed to power up hif during resume: %d\n", ret);
@@ -2519,6 +2520,9 @@ static void ath11k_core_restart(struct work_struct *work)
 	struct ath11k_base *ab = container_of(work, struct ath11k_base, restart_work);
 	int ret;
 
+	if (ab->is_reset)
+		pm_wakeup_ws_event(ab->recovery_ws, ATH11K_RECOVERY_WAKEUP_MS, false);
+
 	ret = ath11k_core_reconfigure_on_crash(ab);
 	if (ret) {
 		ath11k_err(ab, "failed to reconfigure driver on crash recovery\n");
@@ -2544,6 +2548,8 @@ static void ath11k_core_reset(struct work_struct *work)
 		ath11k_warn(ab, "ignore reset dev flags 0x%lx\n", ab->dev_flags);
 		return;
 	}
+
+	pm_wakeup_ws_event(ab->recovery_ws, ATH11K_RECOVERY_WAKEUP_MS, false);
 
 	/* Sometimes the recovery will fail and then the next all recovery fail,
 	 * this is to avoid infinite recovery since it can not recovery success.
@@ -2608,6 +2614,37 @@ static void ath11k_core_reset(struct work_struct *work)
 	ath11k_dbg(ab, ATH11K_DBG_BOOT, "reset started\n");
 }
 
+static void ath11k_core_queue_reset(struct ath11k_base *ab)
+{
+	pm_wakeup_ws_event(ab->recovery_ws, ATH11K_RECOVERY_WAKEUP_MS, false);
+	queue_work(ab->workqueue_aux, &ab->reset_work);
+}
+
+void ath11k_core_schedule_reset(struct ath11k_base *ab)
+{
+	struct ath11k *ar;
+	int radio_index;
+
+	set_bit(ATH11K_FLAG_CRASH_FLUSH, &ab->dev_flags);
+	wake_up(&ab->wmi_ab.tx_credits_wq);
+	for (radio_index = 0; radio_index < ab->num_radios; radio_index++) {
+		ar = ab->pdevs[radio_index].ar;
+		if (!ar)
+			continue;
+		wake_up(&ar->dp.tx_empty_waitq);
+		wake_up(&ar->txmgmt_empty_waitq);
+	}
+
+	set_bit(ATH11K_FLAG_CRASH_PENDING, &ab->dev_flags);
+	smp_mb__after_atomic();
+	if (test_bit(ATH11K_FLAG_SYSTEM_SUSPEND, &ab->dev_flags))
+		return;
+
+	if (test_and_clear_bit(ATH11K_FLAG_CRASH_PENDING, &ab->dev_flags))
+		ath11k_core_queue_reset(ab);
+}
+EXPORT_SYMBOL(ath11k_core_schedule_reset);
+
 static int ath11k_init_hw_params(struct ath11k_base *ab)
 {
 	const struct ath11k_hw_params *hw_params = NULL;
@@ -2661,9 +2698,18 @@ static int ath11k_core_pm_notify(struct notifier_block *nb,
 	switch (action) {
 	case PM_SUSPEND_PREPARE:
 		ab->actual_pm_policy = ab->pm_policy;
+		set_bit(ATH11K_FLAG_SYSTEM_SUSPEND, &ab->dev_flags);
 		break;
 	case PM_HIBERNATION_PREPARE:
 		ab->actual_pm_policy = ATH11K_PM_DEFAULT;
+		set_bit(ATH11K_FLAG_SYSTEM_SUSPEND, &ab->dev_flags);
+		break;
+	case PM_POST_SUSPEND:
+	case PM_POST_HIBERNATION:
+		clear_bit(ATH11K_FLAG_SYSTEM_SUSPEND, &ab->dev_flags);
+		smp_mb__after_atomic();
+		if (test_and_clear_bit(ATH11K_FLAG_CRASH_PENDING, &ab->dev_flags))
+			ath11k_core_queue_reset(ab);
 		break;
 	default:
 		break;
@@ -2743,6 +2789,7 @@ void ath11k_core_free(struct ath11k_base *ab)
 {
 	destroy_workqueue(ab->workqueue_aux);
 	destroy_workqueue(ab->workqueue);
+	wakeup_source_unregister(ab->recovery_ws);
 
 	kfree(ab);
 }
@@ -2766,6 +2813,8 @@ struct ath11k_base *ath11k_core_alloc(struct device *dev, size_t priv_size,
 	ab->workqueue_aux = create_singlethread_workqueue("ath11k_aux_wq");
 	if (!ab->workqueue_aux)
 		goto err_free_wq;
+
+	ab->recovery_ws = wakeup_source_register(dev, "ath11k_recovery");
 
 	mutex_init(&ab->core_lock);
 	mutex_init(&ab->tbl_mtx_lock);

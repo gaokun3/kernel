@@ -17,6 +17,7 @@
 #include <linux/average.h>
 #include <linux/firmware.h>
 #include <linux/suspend.h>
+#include <linux/pm_wakeup.h>
 #include <linux/of.h>
 
 #include "qmi.h"
@@ -70,6 +71,7 @@ extern bool ath11k_ftm_mode;
 #define ATH11K_RESET_FAIL_TIMEOUT_HZ (20 * HZ)
 #define ATH11K_RECONFIGURE_TIMEOUT_HZ (10 * HZ)
 #define ATH11K_RECOVER_START_TIMEOUT_HZ (20 * HZ)
+#define ATH11K_RECOVERY_WAKEUP_MS (60 * MSEC_PER_SEC)
 
 enum ath11k_supported_bw {
 	ATH11K_BW_20	= 0,
@@ -288,6 +290,8 @@ enum ath11k_dev_flags {
 	ATH11K_FLAG_DEVICE_INIT_DONE,
 	ATH11K_FLAG_MULTI_MSI_VECTORS,
 	ATH11K_FLAG_FTM_SEGMENTED,
+	ATH11K_FLAG_SYSTEM_SUSPEND,
+	ATH11K_FLAG_CRASH_PENDING,
 };
 
 enum ath11k_monitor_flags {
@@ -1020,6 +1024,7 @@ struct ath11k_base {
 	struct work_struct update_11d_work;
 	u8 new_alpha2[3];
 	struct workqueue_struct *workqueue_aux;
+	struct wakeup_source *recovery_ws;
 	struct work_struct reset_work;
 	atomic_t reset_count;
 	atomic_t recovery_count;
@@ -1288,6 +1293,7 @@ int ath11k_core_resume(struct ath11k_base *ab);
 int ath11k_core_suspend(struct ath11k_base *ab);
 int ath11k_core_suspend_late(struct ath11k_base *ab);
 void ath11k_core_pre_reconfigure_recovery(struct ath11k_base *ab);
+void ath11k_core_schedule_reset(struct ath11k_base *ab);
 bool ath11k_core_coldboot_cal_support(struct ath11k_base *ab);
 
 const struct firmware *ath11k_core_firmware_request(struct ath11k_base *ab,

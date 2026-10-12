@@ -284,7 +284,7 @@ static void ath11k_mhi_op_status_cb(struct mhi_controller *mhi_cntrl,
 
 		spin_lock_bh(&ab->base_lock);
 		if (!(test_bit(ATH11K_FLAG_UNREGISTERING, &ab->dev_flags)))
-			queue_work(ab->workqueue_aux, &ab->reset_work);
+			ath11k_core_schedule_reset(ab);
 		spin_unlock_bh(&ab->base_lock);
 
 		break;
