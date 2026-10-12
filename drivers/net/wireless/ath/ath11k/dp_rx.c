@@ -5777,6 +5777,29 @@ int ath11k_dp_rx_pdev_mon_detach(struct ath11k *ar)
 	return 0;
 }
 
+bool ath11k_dp_rx_mon_status_allocated(struct ath11k_base *ab)
+{
+	struct dp_srng *ring;
+	struct ath11k *ar;
+	int radio_index, ring_index;
+
+	lockdep_assert_held(&ab->core_lock);
+
+	for (radio_index = 0; radio_index < ab->num_radios; radio_index++) {
+		ar = ab->pdevs[radio_index].ar;
+		if (!ar)
+			return false;
+
+		for (ring_index = 0; ring_index < ab->hw_params.num_rxdma_per_pdev; ring_index++) {
+			ring = &ar->dp.rx_mon_status_refill_ring[ring_index].refill_buf_ring;
+			if (!ring->vaddr_unaligned)
+				return false;
+		}
+	}
+
+	return true;
+}
+
 int ath11k_dp_rx_pktlog_start(struct ath11k_base *ab)
 {
 	/* start reap timer */
