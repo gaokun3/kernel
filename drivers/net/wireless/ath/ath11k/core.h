@@ -72,6 +72,7 @@ extern bool ath11k_ftm_mode;
 #define ATH11K_RECONFIGURE_TIMEOUT_HZ (10 * HZ)
 #define ATH11K_RECOVER_START_TIMEOUT_HZ (20 * HZ)
 #define ATH11K_RECOVERY_WAKEUP_MS (60 * MSEC_PER_SEC)
+#define ATH11K_RECOVERY_SETTLE_MS (10 * MSEC_PER_SEC)
 
 enum ath11k_supported_bw {
 	ATH11K_BW_20	= 0,

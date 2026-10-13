@@ -9294,6 +9294,8 @@ ath11k_mac_op_reconfig_complete(struct ieee80211_hw *hw,
 				ab->is_reset = false;
 				atomic_set(&ab->fail_cont_count, 0);
 				__pm_relax(ab->recovery_ws);
+				pm_wakeup_ws_event(ab->recovery_ws,
+						   ATH11K_RECOVERY_SETTLE_MS, false);
 				ath11k_dbg(ab, ATH11K_DBG_BOOT, "reset success\n");
 			}
 		}
