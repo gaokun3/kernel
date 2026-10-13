@@ -2793,6 +2793,7 @@ void ath11k_core_free(struct ath11k_base *ab)
 	destroy_workqueue(ab->workqueue_aux);
 	destroy_workqueue(ab->workqueue);
 	wakeup_source_unregister(ab->recovery_ws);
+	wakeup_source_unregister(ab->scan_ws);
 
 	kfree(ab);
 }
@@ -2818,6 +2819,7 @@ struct ath11k_base *ath11k_core_alloc(struct device *dev, size_t priv_size,
 		goto err_free_wq;
 
 	ab->recovery_ws = wakeup_source_register(dev, "ath11k_recovery");
+	ab->scan_ws = wakeup_source_register(dev, "ath11k_scan");
 
 	mutex_init(&ab->core_lock);
 	mutex_init(&ab->tbl_mtx_lock);

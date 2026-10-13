@@ -3902,6 +3902,10 @@ void __ath11k_mac_scan_finish(struct ath11k *ar)
 			};
 
 			ieee80211_scan_completed(ar->hw, &info);
+
+			__pm_relax(ar->ab->scan_ws);
+			pm_wakeup_ws_event(ar->ab->scan_ws,
+					   ATH11K_SCAN_SETTLE_MS, false);
 		}
 
 		ar->scan.state = ATH11K_SCAN_IDLE;
@@ -4329,12 +4333,15 @@ static int ath11k_mac_op_hw_scan(struct ieee80211_hw *hw,
 	/* Add a margin to account for event/command processing */
 	scan_timeout += ATH11K_MAC_SCAN_CMD_EVT_OVERHEAD;
 
+	pm_wakeup_ws_event(ar->ab->scan_ws, scan_timeout, false);
+
 	ret = ath11k_start_scan(ar, arg);
 	if (ret) {
 		ath11k_warn(ar->ab, "failed to start hw scan: %d\n", ret);
 		spin_lock_bh(&ar->data_lock);
 		ar->scan.state = ATH11K_SCAN_IDLE;
 		spin_unlock_bh(&ar->data_lock);
+		__pm_relax(ar->ab->scan_ws);
 	}
 
 	ieee80211_queue_delayed_work(ar->hw, &ar->scan.timeout,

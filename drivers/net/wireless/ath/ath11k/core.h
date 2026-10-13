@@ -73,6 +73,7 @@ extern bool ath11k_ftm_mode;
 #define ATH11K_RECOVER_START_TIMEOUT_HZ (20 * HZ)
 #define ATH11K_RECOVERY_WAKEUP_MS (60 * MSEC_PER_SEC)
 #define ATH11K_RECOVERY_SETTLE_MS (10 * MSEC_PER_SEC)
+#define ATH11K_SCAN_SETTLE_MS (5 * MSEC_PER_SEC)
 
 enum ath11k_supported_bw {
 	ATH11K_BW_20	= 0,
@@ -1026,6 +1027,7 @@ struct ath11k_base {
 	u8 new_alpha2[3];
 	struct workqueue_struct *workqueue_aux;
 	struct wakeup_source *recovery_ws;
+	struct wakeup_source *scan_ws;
 	struct work_struct reset_work;
 	atomic_t reset_count;
 	atomic_t recovery_count;
