@@ -485,6 +485,13 @@ int ath11k_mhi_resume(struct ath11k_pci *ab_pci)
 	struct ath11k_base *ab = ab_pci->ab;
 	int ret;
 
+	if (mhi_get_exec_env(ab_pci->mhi_ctrl) == MHI_EE_RDDM ||
+	    mhi_get_mhi_state(ab_pci->mhi_ctrl) == MHI_STATE_SYS_ERR) {
+		ath11k_warn(ab, "firmware crashed during suspend\n");
+		ath11k_core_schedule_reset(ab);
+		return -ESHUTDOWN;
+	}
+
 	/* Do force MHI resume as some devices like QCA6390, WCN6855
 	 * are not in M3 state but they are functional. So just ignore
 	 * the MHI state while resuming.
