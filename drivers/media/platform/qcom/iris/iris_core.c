@@ -14,12 +14,15 @@
 
 void iris_core_deinit(struct iris_core *core)
 {
-	pm_runtime_resume_and_get(core->dev);
+	int ret;
+
+	ret = pm_runtime_resume_and_get(core->dev);
 
 	mutex_lock(&core->lock);
 	if (core->state != IRIS_CORE_DEINIT) {
 		iris_fw_unload(core);
-		iris_vpu_power_off(core);
+		if (!ret)
+			iris_vpu_power_off(core);
 		mutex_unlock(&core->lock);
 
 		synchronize_irq(core->irq);
@@ -32,7 +35,8 @@ void iris_core_deinit(struct iris_core *core)
 	}
 	mutex_unlock(&core->lock);
 
-	pm_runtime_put_sync(core->dev);
+	if (!ret)
+		pm_runtime_put_sync(core->dev);
 }
 
 bool iris_core_prepare_deinit(struct iris_core *core)
