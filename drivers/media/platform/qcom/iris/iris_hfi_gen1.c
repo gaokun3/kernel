@@ -30,6 +30,22 @@ static struct platform_inst_fw_cap inst_fw_cap_sm8250_dec[] = {
 		.hfi_id = HFI_PROPERTY_PARAM_WORK_MODE,
 		.set = iris_set_stage,
 	},
+	{
+		.cap_id = DISPLAY_DELAY_ENABLE,
+		.min = 0,
+		.max = 1,
+		.step_or_mask = 1,
+		.value = 0,
+		.hfi_id = HFI_PROPERTY_PARAM_VDEC_OUTPUT_ORDER,
+		.flags = CAP_FLAG_INPUT_PORT,
+	},
+	{
+		.cap_id = DISPLAY_DELAY,
+		.min = 0,
+		.max = 0,
+		.step_or_mask = 1,
+		.value = 0,
+	},
 };
 
 static const struct platform_inst_fw_cap inst_fw_cap_sm8250_enc[] = {
@@ -232,6 +248,7 @@ static const struct platform_inst_fw_cap inst_fw_cap_sm8250_enc[] = {
 };
 
 static const u32 sm8250_vdec_input_config_param_default[] = {
+	HFI_PROPERTY_PARAM_VDEC_OUTPUT_ORDER,
 	HFI_PROPERTY_CONFIG_VIDEOCORES_USAGE,
 	HFI_PROPERTY_PARAM_UNCOMPRESSED_FORMAT_SELECT,
 	HFI_PROPERTY_PARAM_UNCOMPRESSED_PLANE_ACTUAL_CONSTRAINTS_INFO,

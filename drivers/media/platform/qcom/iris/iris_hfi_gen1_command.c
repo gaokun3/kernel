@@ -576,6 +576,17 @@ iris_hfi_gen1_packet_session_set_property(struct hfi_session_set_property_pkt *p
 		packet->shdr.hdr.size += sizeof(u32) + sizeof(*multi);
 		break;
 	}
+	case HFI_PROPERTY_PARAM_VDEC_OUTPUT_ORDER: {
+		u32 *output_order = pdata;
+
+		if (*output_order != HFI_OUTPUT_ORDER_DISPLAY &&
+		    *output_order != HFI_OUTPUT_ORDER_DECODE)
+			return -EINVAL;
+
+		packet->data[1] = *output_order;
+		packet->shdr.hdr.size += sizeof(u32) * 2;
+		break;
+	}
 	case HFI_PROPERTY_PARAM_BUFFER_SIZE_ACTUAL: {
 		struct hfi_buffer_size_actual *in = pdata, *sz = prop_data;
 
@@ -1011,6 +1022,21 @@ static int iris_hfi_gen1_set_stride(struct iris_inst *inst, u32 plane)
 	return hfi_gen1_set_property(inst, ptype, &plane_actual_info, sizeof(plane_actual_info));
 }
 
+static int iris_hfi_gen1_set_decode_order_output(struct iris_inst *inst, u32 plane)
+{
+	struct platform_inst_fw_cap *cap = &inst->fw_caps[DISPLAY_DELAY_ENABLE];
+	u32 output_order;
+
+	if (!(cap->flags & CAP_FLAG_CLIENT_SET))
+		return 0;
+
+	output_order = cap->value ? HFI_OUTPUT_ORDER_DECODE :
+				    HFI_OUTPUT_ORDER_DISPLAY;
+
+	return hfi_gen1_set_property(inst, HFI_PROPERTY_PARAM_VDEC_OUTPUT_ORDER,
+				     &output_order, sizeof(output_order));
+}
+
 static int iris_hfi_gen1_session_set_config_params(struct iris_inst *inst, u32 plane)
 {
 	struct iris_hfi_prop_type_handle const *handler = NULL;
@@ -1021,6 +1047,8 @@ static int iris_hfi_gen1_session_set_config_params(struct iris_inst *inst, u32 p
 	int ret;
 
 	static const struct iris_hfi_prop_type_handle vdec_prop_type_handle_inp_arr[] = {
+		{HFI_PROPERTY_PARAM_VDEC_OUTPUT_ORDER,
+			iris_hfi_gen1_set_decode_order_output},
 		{HFI_PROPERTY_PARAM_FRAME_SIZE,
 			iris_hfi_gen1_set_resolution},
 		{HFI_PROPERTY_CONFIG_VIDEOCORES_USAGE,
