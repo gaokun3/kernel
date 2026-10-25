@@ -1400,7 +1400,12 @@ static int himax_spi_probe(struct spi_device *spi)
 	spi->cs_setup.value = HIMAX_SPI_CS_SETUP_TIME;
 
 	ts->spi = spi;
-	ts->spi_xfer_max_sz = HIMAX_HX83121A_FULL_STACK_SZ;
+	/*
+	 * spi_xfer_max_sz includes the read header.  Leave room for it so
+	 * max_trunk_sz covers one complete event stack in a single transfer.
+	 */
+	ts->spi_xfer_max_sz =
+		HIMAX_HX83121A_FULL_STACK_SZ + HIMAX_BUS_R_HLEN;
 	ts->xfer_buf_sz = ts->spi_xfer_max_sz;
 	ts->event_buf_sz = HIMAX_HX83121A_FULL_STACK_SZ;
 	ts->xfer_buf = devm_kzalloc(ts->dev, ts->xfer_buf_sz, GFP_KERNEL);
