@@ -22,6 +22,9 @@
 static bool disable_pressure = true;
 module_param(disable_pressure, bool, 0444);
 MODULE_PARM_DESC(disable_pressure, "Disable ABS_MT_TOUCH_MAJOR and ABS_MT_PRESSURE axes (default: true)");
+static bool fast_idle = true;
+module_param(fast_idle, bool, 0644);
+MODULE_PARM_DESC(fast_idle, "Skip touch solving after 30 seconds of empty frames (default: true)");
 #include <linux/spi/spi.h>
 #include <linux/math.h>
 #include <linux/math64.h>
@@ -102,6 +105,11 @@ HIMAX_MAX_TX + HIMAX_MAX_RX) * 2)
 #define HIMAX_PANEL_REINIT_DELAY_MS			50
 /* Let the panel and display pipeline settle before TDDI touch recovery. */
 #define HIMAX_PANEL_ENABLE_SETTLE_MS			300
+/* The controller normally delivers 120 frames per second. */
+#define HIMAX_FAST_IDLE_ENTER_FRAMES			(30U * 120U)
+#define HIMAX_FAST_IDLE_PROBE_FRAMES			120U
+#define HIMAX_FAST_IDLE_WAKE_MAX			200
+#define HIMAX_RAW_BASELINE				0x7ffe
 /* HIMAX SPI function select, 1st byte of any SPI command sequence */
 #define HIMAX_SPI_FUNCTION_READ				0xf3
 #define HIMAX_SPI_FUNCTION_WRITE			0xf2
@@ -127,6 +135,10 @@ struct himax_ts_data {
 	bool panel_enabled;
 	bool shutting_down;
 	bool awaiting_empty_frame;
+	u16 empty_frames;
+	u64 fast_idle_skipped;
+	u64 fast_idle_wakeups;
+	u64 fast_idle_probes;
 	struct gpio_desc *gpiod_rst;
 	struct device *dev;
 	struct spi_device *spi;
@@ -644,6 +656,8 @@ static int himax_input_dev_config(struct himax_ts_data *ts)
 
 static void himax_release_all_touches(struct himax_ts_data *ts)
 {
+	ts->empty_frames = 0;
+
 	if (ts->algo) {
 		memset(ts->algo->tracks, 0, sizeof(ts->algo->tracks));
 		ts->algo->touch_start_frames = 0;
@@ -998,6 +1012,20 @@ HX_ALGO_ATTR_BOOL_RW(track_active_guard);
 HX_ALGO_ATTR_U8_RW(track_start_debounce);
 HX_ALGO_ATTR_S32_RW(track_jump_dist2);
 
+static ssize_t fast_idle_stats_show(struct device *dev,
+				    struct device_attribute *attr, char *buf)
+{
+	struct himax_ts_data *ts = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf,
+			  "enabled=%u empty_frames=%u skipped=%llu wakeups=%llu probes=%llu\n",
+			  fast_idle, READ_ONCE(ts->empty_frames),
+			  (unsigned long long)READ_ONCE(ts->fast_idle_skipped),
+			  (unsigned long long)READ_ONCE(ts->fast_idle_wakeups),
+			  (unsigned long long)READ_ONCE(ts->fast_idle_probes));
+}
+static DEVICE_ATTR_RO(fast_idle_stats);
+
 static struct attribute *hx_algo_attrs[] = {
 	&dev_attr_cmf_enabled.attr,
 	&dev_attr_cmf_exclusion.attr,
@@ -1026,6 +1054,7 @@ static struct attribute *hx_algo_attrs[] = {
 	&dev_attr_track_active_guard.attr,
 	&dev_attr_track_start_debounce.attr,
 	&dev_attr_track_jump_dist2.attr,
+	&dev_attr_fast_idle_stats.attr,
 	NULL,
 };
 
@@ -1111,6 +1140,45 @@ static void himax_report_tracked_state(struct himax_ts_data *ts, bool report_on)
 /* Byte offset into the SPI event buffer where the raw capacitance grid starts. */
 #define OFST 4
 
+static bool himax_tracks_active(const struct hx_algo *algo)
+{
+	int i;
+
+	for (i = 0; i < HIMAX_MAX_TOUCH; i++)
+		if (algo->tracks[i].active)
+			return true;
+
+	return false;
+}
+
+static bool himax_fast_idle_ready(const struct himax_ts_data *ts)
+{
+	const struct hx_algo *algo = ts->algo;
+
+	return !ts->awaiting_empty_frame &&
+	       !algo->zone_count && !algo->peak_count && !algo->contact_count &&
+	       !algo->touch_active && !algo->touch_start_frames &&
+	       !himax_tracks_active(algo);
+}
+
+static bool himax_fast_idle_raw_activity(const struct hx_algo *algo,
+					 const u16 *raw)
+{
+	s32 threshold = clamp_t(s32, algo->iir_gate_floor, 1,
+				HIMAX_FAST_IDLE_WAKE_MAX);
+	int i;
+
+	/* Pixel zero is invalid on this panel layout. */
+	for (i = 1; i < HX_PIXELS; i++) {
+		s32 sample = (s32)le16_to_cpup(raw + i) - HIMAX_RAW_BASELINE;
+
+		if (sample >= threshold)
+			return true;
+	}
+
+	return false;
+}
+
 static irqreturn_t himax_ts_thread(int irq, void *data)
 {
 	struct himax_ts_data *ts = data;
@@ -1119,6 +1187,7 @@ static irqreturn_t himax_ts_thread(int irq, void *data)
 	struct input_mt_pos pos[HIMAX_MAX_TOUCH];
 	int cnt;
 	int stable_cnt;
+	bool fast_idle_full_frame = false;
 	bool report_on = true;
 	irqreturn_t irq_ret = IRQ_HANDLED;
 
@@ -1138,6 +1207,23 @@ static irqreturn_t himax_ts_thread(int irq, void *data)
 	}
 
 	// dump_frame((void *)ptr - OFST, true);
+
+	if (!fast_idle) {
+		ts->empty_frames = 0;
+	} else if (ts->empty_frames >= HIMAX_FAST_IDLE_ENTER_FRAMES &&
+		   himax_fast_idle_ready(ts)) {
+		fast_idle_full_frame = true;
+		if (ts->empty_frames >= HIMAX_FAST_IDLE_ENTER_FRAMES +
+					 HIMAX_FAST_IDLE_PROBE_FRAMES) {
+			ts->fast_idle_probes++;
+		} else if (himax_fast_idle_raw_activity(algo, ptr)) {
+			ts->fast_idle_wakeups++;
+		} else {
+			ts->empty_frames++;
+			ts->fast_idle_skipped++;
+			goto out_unlock;
+		}
+	}
 
 	hx_preprocess_frame(algo, ptr);
 	/* dump_frame(algo); */
@@ -1166,6 +1252,15 @@ static irqreturn_t himax_ts_thread(int irq, void *data)
 
 	hx_track_contacts(algo, pos, cnt);
 	stable_cnt = hx_count_stable_tracks(algo);
+
+	if (!cnt && !stable_cnt && himax_fast_idle_ready(ts)) {
+		if (fast_idle_full_frame)
+			ts->empty_frames = HIMAX_FAST_IDLE_ENTER_FRAMES;
+		else if (ts->empty_frames < HIMAX_FAST_IDLE_ENTER_FRAMES)
+			ts->empty_frames++;
+	} else {
+		ts->empty_frames = 0;
+	}
 
 	/* Not final results, touchscreen_report_pos will handle this (x-y swap, y invert) */
 	for (int i = 0; i < HIMAX_MAX_TOUCH; ++i) {
