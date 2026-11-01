@@ -658,6 +658,7 @@ static int gaokun_ec_resume(struct device *dev)
 {
 	struct gaokun_ec *ec = dev_get_drvdata(dev);
 	u8 ec_req[] = MKREQ(0x02, EC_STANDBY_REG, 1, EC_STANDBY_EXIT);
+	u8 status;
 	int ret;
 	int i;
 
@@ -678,10 +679,16 @@ static int gaokun_ec_resume(struct device *dev)
 	if (ret)
 		return ret;
 
-	/* Resume may be unstable, so open lid anyways */
-	input_report_switch(ec->idev, SW_LID, 0);
-	input_sync(ec->idev);
-	ec->lid_opened = true;
+	/*
+	 * Any wakeup source ends up here, so report the lid as the EC sees it:
+	 * a wakeup with the lid closed must not look like the lid opening.
+	 * If the read fails, keep the last state.
+	 */
+	if (!gaokun_ec_psy_read_byte(ec, EC_LID_STATE, &status)) {
+		ec->lid_opened = status & EC_LID_OPEN;
+		input_report_switch(ec->idev, SW_LID, !ec->lid_opened);
+		input_sync(ec->idev);
+	}
 
 	ec->suspended = false;
 	enable_irq(ec->client->irq);
@@ -758,7 +765,9 @@ static irqreturn_t gaokun_ec_irq_handler(int irq, void *data)
 		break;
 
 	case EC_EVENT_LID:
-		gaokun_ec_psy_read_byte(ec, EC_LID_STATE, &status);
+		if (gaokun_ec_psy_read_byte(ec, EC_LID_STATE, &status))
+			break;
+
 		status &= EC_LID_OPEN;
 		if (ec->lid_opened != !!status) {
 			input_report_switch(ec->idev, SW_LID, !status);
