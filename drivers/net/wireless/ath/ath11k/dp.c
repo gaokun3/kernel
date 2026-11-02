@@ -1172,6 +1172,7 @@ void ath11k_dp_shadow_stop_timer(struct ath11k_base *ab,
 		return;
 
 	timer_delete_sync(&update_timer->timer);
+	update_timer->started = false;
 }
 
 void ath11k_dp_shadow_init_timer(struct ath11k_base *ab,
