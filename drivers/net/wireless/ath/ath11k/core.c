@@ -1259,6 +1259,7 @@ int ath11k_core_suspend(struct ath11k_base *ab)
 
 	if (!ath11k_dp_rx_mon_status_allocated(ab)) {
 		ath11k_warn(ab, "rings freed by crash recovery, skipping datapath suspend\n");
+		complete(&ab->restart_completed);
 		ret = 0;
 	} else if (ab->actual_pm_policy == ATH11K_PM_WOW) {
 		ret = ath11k_core_suspend_wow(ab);
@@ -1317,6 +1318,7 @@ static int ath11k_core_resume_default(struct ath11k_base *ab)
 {
 	struct ath11k *ar;
 	long time_left;
+	bool allocated;
 	int ret;
 
 	time_left = wait_for_completion_timeout(&ab->restart_completed,
@@ -1325,6 +1327,12 @@ static int ath11k_core_resume_default(struct ath11k_base *ab)
 		ath11k_warn(ab, "timeout while waiting for restart complete");
 		return -ETIMEDOUT;
 	}
+
+	mutex_lock(&ab->core_lock);
+	allocated = ath11k_dp_rx_mon_status_allocated(ab);
+	mutex_unlock(&ab->core_lock);
+	if (!allocated)
+		return 0;
 
 	/* So far only single_pdev_only devices can reach here,
 	 * so it is valid to handle the first, and the only, pdev.
@@ -2088,7 +2096,8 @@ err_spectral_unregister:
 err_thermal_unregister:
 	ath11k_thermal_unregister(ab);
 err_mac_unregister:
-	ath11k_mac_unregister(ab);
+	if (!test_bit(ATH11K_FLAG_REGISTERED, &ab->dev_flags))
+		ath11k_mac_unregister(ab);
 err_dp_pdev_free:
 	ath11k_dp_pdev_free(ab);
 err_pdev_debug:
@@ -2537,6 +2546,14 @@ static void ath11k_core_end_reset_without_restart(struct ath11k_base *ab)
 	complete(&ab->reset_complete);
 }
 
+static bool ath11k_core_reset_follows(struct ath11k_base *ab)
+{
+	return work_pending(&ab->reset_work) ||
+	       delayed_work_pending(&ab->reset_retry_work) ||
+	       test_bit(ATH11K_FLAG_CRASH_PENDING, &ab->dev_flags) ||
+	       atomic_read(&ab->reset_count) > 1;
+}
+
 static void ath11k_core_restart(struct work_struct *work)
 {
 	struct ath11k_base *ab = container_of(work, struct ath11k_base, restart_work);
@@ -2548,6 +2565,13 @@ static void ath11k_core_restart(struct work_struct *work)
 	ret = ath11k_core_reconfigure_on_crash(ab);
 	if (ret) {
 		ath11k_err(ab, "failed to reconfigure driver on crash recovery\n");
+		spin_lock_bh(&ab->base_lock);
+		if (!ath11k_core_reset_follows(ab) &&
+		    !test_bit(ATH11K_FLAG_UNREGISTERING, &ab->dev_flags))
+			ath11k_core_schedule_reset(ab);
+		spin_unlock_bh(&ab->base_lock);
+		complete_all(&ab->reconfigure_complete);
+		complete(&ab->restart_completed);
 		return;
 	}
 

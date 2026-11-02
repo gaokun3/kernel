@@ -6633,8 +6633,14 @@ static void ath11k_mac_wait_reconfigure(struct ath11k_base *ab)
 
 static bool ath11k_mac_crashed_in_restart(struct ath11k *ar)
 {
-	return ar->state == ATH11K_STATE_RESTARTED &&
-	       test_bit(ATH11K_FLAG_CRASH_FLUSH, &ar->ab->dev_flags);
+	struct ath11k_base *ab = ar->ab;
+
+	if (!test_bit(ATH11K_FLAG_CRASH_FLUSH, &ab->dev_flags))
+		return false;
+
+	return ar->state == ATH11K_STATE_RESTARTED ||
+	       (ar->state == ATH11K_STATE_ON &&
+		test_bit(ATH11K_FLAG_SYSTEM_SUSPEND, &ab->dev_flags));
 }
 
 static int ath11k_mac_op_start(struct ieee80211_hw *hw)

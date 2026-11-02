@@ -699,7 +699,9 @@ static bool ath11k_wow_rings_ready(struct ath11k_base *ab)
 {
 	bool ready;
 
-	mutex_lock(&ab->core_lock);
+	if (!mutex_trylock(&ab->core_lock))
+		return false;
+
 	ready = !test_bit(ATH11K_FLAG_CRASH_FLUSH, &ab->dev_flags) &&
 		ath11k_dp_rx_mon_status_allocated(ab);
 	mutex_unlock(&ab->core_lock);
