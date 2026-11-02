@@ -9296,13 +9296,13 @@ ath11k_mac_op_reconfig_complete(struct ieee80211_hw *hw,
 			 * the recovery has to be done for each radio
 			 */
 			if (recovery_count == ab->num_radios) {
-				atomic_dec(&ab->reset_count);
-				complete(&ab->reset_complete);
 				ab->is_reset = false;
 				atomic_set(&ab->fail_cont_count, 0);
 				__pm_relax(ab->recovery_ws);
 				pm_wakeup_ws_event(ab->recovery_ws,
 						   ATH11K_RECOVERY_SETTLE_MS, false);
+				atomic_dec(&ab->reset_count);
+				complete(&ab->reset_complete);
 				ath11k_dbg(ab, ATH11K_DBG_BOOT, "reset success\n");
 			}
 		}

@@ -2568,7 +2568,6 @@ static void ath11k_core_reset(struct work_struct *work)
 {
 	struct ath11k_base *ab = container_of(work, struct ath11k_base, reset_work);
 	int reset_count, fail_cont_count;
-	long time_left;
 
 	if (!(test_bit(ATH11K_FLAG_REGISTERED, &ab->dev_flags))) {
 		ath11k_warn(ab, "ignore reset dev flags 0x%lx\n", ab->dev_flags);
@@ -2589,28 +2588,29 @@ static void ath11k_core_reset(struct work_struct *work)
 	    time_before(jiffies, ab->reset_fail_timeout))
 		return;
 
+	reinit_completion(&ab->reset_complete);
 	reset_count = atomic_inc_return(&ab->reset_count);
 
 	if (reset_count > 1) {
-		/* Sometimes it happened another reset worker before the previous one
-		 * completed, then the second reset worker will destroy the previous one,
-		 * thus below is to avoid that.
-		 */
 		ath11k_warn(ab, "already resetting count %d\n", reset_count);
 
-		reinit_completion(&ab->reset_complete);
-		time_left = wait_for_completion_timeout(&ab->reset_complete,
-							ATH11K_RESET_TIMEOUT_HZ);
+		if (!wait_for_completion_timeout(&ab->reset_complete,
+						 ATH11K_RESET_TIMEOUT_HZ)) {
+			ab->reset_fail_timeout = jiffies + ATH11K_RESET_FAIL_TIMEOUT_HZ;
+			/* Record the continuous recovery fail count when recovery failed*/
+			atomic_inc(&ab->fail_cont_count);
+		}
 
-		if (time_left) {
-			ath11k_dbg(ab, ATH11K_DBG_BOOT, "to skip reset\n");
+		flush_work(&ab->restart_work);
+
+		if (test_bit(ATH11K_FLAG_SYSTEM_SUSPEND, &ab->dev_flags)) {
 			atomic_dec(&ab->reset_count);
+			ath11k_core_schedule_reset(ab);
 			return;
 		}
 
-		ab->reset_fail_timeout = jiffies + ATH11K_RESET_FAIL_TIMEOUT_HZ;
-		/* Record the continuous recovery fail count when recovery failed*/
-		atomic_inc(&ab->fail_cont_count);
+		atomic_set(&ab->reset_count, 1);
+		pm_wakeup_ws_event(ab->recovery_ws, ATH11K_RECOVERY_WAKEUP_MS, false);
 	}
 
 	ath11k_dbg(ab, ATH11K_DBG_BOOT, "reset starting\n");
@@ -2628,8 +2628,8 @@ static void ath11k_core_reset(struct work_struct *work)
 
 	ath11k_dbg(ab, ATH11K_DBG_BOOT, "waiting recovery start...\n");
 
-	time_left = wait_for_completion_timeout(&ab->recovery_start,
-						ATH11K_RECOVER_START_TIMEOUT_HZ);
+	wait_for_completion_timeout(&ab->recovery_start,
+				    ATH11K_RECOVER_START_TIMEOUT_HZ);
 
 	ath11k_hif_irq_disable(ab);
 	ath11k_hif_ce_irq_disable(ab);
