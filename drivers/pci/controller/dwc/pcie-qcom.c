@@ -40,6 +40,8 @@
 #include <linux/units.h>
 #include <linux/workqueue.h>
 
+#include <dt-bindings/interconnect/qcom,icc.h>
+
 #include "../../pci.h"
 #include "../pci-host-common.h"
 #include "pcie-designware.h"
@@ -376,6 +378,7 @@ struct qcom_pcie_cfg {
 	bool no_l0s;
 	bool has_ext_parf_regs;
 	bool has_link_down_recovery;
+	bool l2_mem_vote;
 };
 
 struct qcom_pcie_perst {
@@ -1899,6 +1902,7 @@ static const struct qcom_pcie_cfg cfg_sc8280xp = {
 	.no_l0s = true,
 	.override_no_snoop = true,
 	.has_ext_parf_regs = true,
+	.l2_mem_vote = true,
 };
 
 static const struct qcom_pcie_cfg cfg_sc8280xp_link_down = {
@@ -1907,6 +1911,14 @@ static const struct qcom_pcie_cfg cfg_sc8280xp_link_down = {
 	.override_no_snoop = true,
 	.has_ext_parf_regs = true,
 	.has_link_down_recovery = true,
+	.l2_mem_vote = true,
+};
+
+static const struct qcom_pcie_cfg cfg_x1e80100 = {
+	.ops = &ops_1_21_0,
+	.no_l0s = true,
+	.override_no_snoop = true,
+	.has_ext_parf_regs = true,
 };
 
 static const struct qcom_pcie_cfg cfg_fw_managed = {
@@ -3219,6 +3231,29 @@ err_pm_runtime_put:
 	return ret;
 }
 
+/*
+ * On SC8280XP the SoC resets around the next wake if the last vote on the
+ * PCIe-MEM paths goes away. Keep a minimal vote in the active and wake sets,
+ * and leave the sleep set empty so that DDR and CX can still collapse.
+ */
+static int qcom_pcie_icc_mem_disable(struct qcom_pcie *pcie)
+{
+	if (!pcie->cfg->l2_mem_vote)
+		return icc_disable(pcie->icc_mem);
+
+	icc_set_tag(pcie->icc_mem, QCOM_ICC_TAG_ACTIVE_ONLY);
+
+	return icc_set_bw(pcie->icc_mem, 0, kBps_to_icc(1));
+}
+
+static int qcom_pcie_icc_mem_enable(struct qcom_pcie *pcie)
+{
+	if (pcie->cfg->l2_mem_vote)
+		icc_set_tag(pcie->icc_mem, QCOM_ICC_TAG_ALWAYS);
+
+	return icc_enable(pcie->icc_mem);
+}
+
 static int qcom_pcie_suspend_noirq(struct device *dev)
 {
 	struct qcom_pcie *pcie;
@@ -3239,7 +3274,7 @@ static int qcom_pcie_suspend_noirq(struct device *dev)
 	}
 
 	if (pcie->pci->suspended) {
-		ret = icc_disable(pcie->icc_mem);
+		ret = qcom_pcie_icc_mem_disable(pcie);
 		if (ret)
 			dev_err(dev, "Failed to disable PCIe-MEM interconnect path: %d\n", ret);
 
@@ -3307,7 +3342,7 @@ static int qcom_pcie_resume_noirq(struct device *dev)
 			return ret;
 		}
 
-		ret = icc_enable(pcie->icc_mem);
+		ret = qcom_pcie_icc_mem_enable(pcie);
 		if (ret) {
 			dev_err(dev, "Failed to enable PCIe-MEM interconnect path: %d\n", ret);
 			goto disable_icc_cpu;
@@ -3343,7 +3378,7 @@ static int qcom_pcie_resume_noirq(struct device *dev)
 
 	return 0;
 disable_icc_mem:
-	icc_disable(pcie->icc_mem);
+	qcom_pcie_icc_mem_disable(pcie);
 disable_icc_cpu:
 	icc_disable(pcie->icc_cpu);
 
@@ -3377,7 +3412,7 @@ static const struct of_device_id qcom_pcie_match[] = {
 	{ .compatible = "qcom,pcie-sm8450-pcie0", .data = &cfg_1_9_0 },
 	{ .compatible = "qcom,pcie-sm8450-pcie1", .data = &cfg_1_9_0 },
 	{ .compatible = "qcom,pcie-sm8550", .data = &cfg_1_9_0 },
-	{ .compatible = "qcom,pcie-x1e80100", .data = &cfg_sc8280xp },
+	{ .compatible = "qcom,pcie-x1e80100", .data = &cfg_x1e80100 },
 	{ }
 };
 
