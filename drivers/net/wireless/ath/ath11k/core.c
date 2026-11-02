@@ -2627,6 +2627,7 @@ static void ath11k_core_reset(struct work_struct *work)
 {
 	struct ath11k_base *ab = container_of(work, struct ath11k_base, reset_work);
 	int reset_count;
+	int ret;
 
 	if (!(test_bit(ATH11K_FLAG_REGISTERED, &ab->dev_flags))) {
 		ath11k_warn(ab, "ignore reset dev flags 0x%lx\n", ab->dev_flags);
@@ -2680,7 +2681,12 @@ static void ath11k_core_reset(struct work_struct *work)
 	ath11k_hif_ce_irq_disable(ab);
 
 	ath11k_hif_power_down(ab, false);
-	ath11k_hif_power_up(ab);
+	ret = ath11k_hif_power_up(ab);
+	if (ret) {
+		ath11k_err(ab, "failed to power up for the reset: %d\n", ret);
+		complete_all(&ab->reconfigure_complete);
+		return;
+	}
 
 	ath11k_dbg(ab, ATH11K_DBG_BOOT, "reset started\n");
 }

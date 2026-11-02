@@ -442,6 +442,7 @@ int ath11k_mhi_start(struct ath11k_pci *ab_pci)
 		ath11k_warn(ab, "failed to prepare mhi: %d", ret);
 		return ret;
 	}
+	set_bit(ATH11K_PCI_MHI_PREPARED, &ab_pci->flags);
 
 	ret = mhi_sync_power_up(ab_pci->mhi_ctrl);
 	if (ret) {
@@ -454,6 +455,9 @@ int ath11k_mhi_start(struct ath11k_pci *ab_pci)
 
 void ath11k_mhi_stop(struct ath11k_pci *ab_pci, bool is_suspend)
 {
+	if (!test_and_clear_bit(ATH11K_PCI_MHI_PREPARED, &ab_pci->flags))
+		return;
+
 	/* During suspend we need to use mhi_power_down_keep_dev()
 	 * workaround, otherwise ath11k_core_resume() will timeout
 	 * during resume.

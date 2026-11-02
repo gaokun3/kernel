@@ -55,6 +55,7 @@
 
 enum ath11k_pci_flags {
 	ATH11K_PCI_ASPM_RESTORE,
+	ATH11K_PCI_MHI_PREPARED,
 };
 
 struct ath11k_pci {
