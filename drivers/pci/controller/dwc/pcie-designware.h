@@ -582,6 +582,7 @@ struct dw_pcie {
 	struct reset_control_bulk_data	core_rsts[DW_PCIE_NUM_CORE_RSTS];
 	struct gpio_desc		*pe_rst;
 	bool			suspended;
+	bool			link_up_at_suspend;
 	struct debugfs_info	*debugfs;
 	enum			dw_pcie_device_mode mode;
 	u16			ptm_vsec_offset;

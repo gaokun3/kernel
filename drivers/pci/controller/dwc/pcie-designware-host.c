@@ -24,6 +24,12 @@
 #include "../../pci.h"
 #include "pcie-designware.h"
 
+/*
+ * Time a slot stays off when its link is retried on resume. The deinit hook
+ * may remove the slot supply, and the SSD's minimum off time isn't documented.
+ */
+#define DW_PCIE_RESUME_RETRY_OFF_MS	3000
+
 static struct pci_ops dw_pcie_ops;
 static struct pci_ops dw_pcie_ecam_ops;
 static struct pci_ops dw_child_pcie_ops;
@@ -1235,7 +1241,8 @@ int dw_pcie_suspend_noirq(struct dw_pcie *pci)
 	int ret = 0;
 	u32 val;
 
-	if (!dw_pcie_link_up(pci))
+	pci->link_up_at_suspend = dw_pcie_link_up(pci);
+	if (!pci->link_up_at_suspend)
 		goto stop_link;
 
 	if (!pci_host_common_d3cold_possible(pci->pp.bridge, &pme_capable))
@@ -1303,11 +1310,13 @@ EXPORT_SYMBOL_GPL(dw_pcie_suspend_noirq);
 
 int dw_pcie_resume_noirq(struct dw_pcie *pci)
 {
+	bool retry = pci->link_up_at_suspend;
 	int ret;
 
 	if (!pci->suspended)
 		return 0;
 
+bring_up:
 	if (pci->pp.ops->init) {
 		ret = pci->pp.ops->init(&pci->pp);
 		if (ret) {
@@ -1322,6 +1331,24 @@ int dw_pcie_resume_noirq(struct dw_pcie *pci)
 	if (ret)
 		goto err_deinit;
 
+	ret = dw_pcie_wait_for_link(pci);
+
+	/*
+	 * The endpoint had a link before the suspend, so it should still be
+	 * there, and nothing below the Root Port has been resumed yet. Take the
+	 * slot down once more before giving up on it.
+	 */
+	if (ret && retry) {
+		dev_warn(pci->dev, "Link didn't come back (%d), taking the slot down\n",
+			 ret);
+		retry = false;
+		dw_pcie_stop_link(pci);
+		if (pci->pp.ops->deinit)
+			pci->pp.ops->deinit(&pci->pp);
+		msleep(DW_PCIE_RESUME_RETRY_OFF_MS);
+		goto bring_up;
+	}
+
 	/*
 	 * The PM core resumes the Root Port and its children whatever happens
 	 * here, and they reach the controller through the DBI. Keep the host
@@ -1329,8 +1356,6 @@ int dw_pcie_resume_noirq(struct dw_pcie *pci)
 	 * link check in dw_pcie_other_conf_map_bus(), while tearing the host
 	 * down would leave the DBI unclocked.
 	 */
-	dw_pcie_wait_for_link(pci);
-
 	if (pci->pp.ops->post_init)
 		pci->pp.ops->post_init(&pci->pp);
 
