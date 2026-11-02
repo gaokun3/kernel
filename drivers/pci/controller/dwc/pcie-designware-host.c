@@ -1322,9 +1322,14 @@ int dw_pcie_resume_noirq(struct dw_pcie *pci)
 	if (ret)
 		goto err_deinit;
 
-	ret = dw_pcie_wait_for_link(pci);
-	if (ret == -ETIMEDOUT)
-		goto err_stop_link;
+	/*
+	 * The PM core resumes the Root Port and its children whatever happens
+	 * here, and they reach the controller through the DBI. Keep the host
+	 * up if the link failed: config accesses to the children fail at the
+	 * link check in dw_pcie_other_conf_map_bus(), while tearing the host
+	 * down would leave the DBI unclocked.
+	 */
+	dw_pcie_wait_for_link(pci);
 
 	if (pci->pp.ops->post_init)
 		pci->pp.ops->post_init(&pci->pp);
@@ -1332,9 +1337,6 @@ int dw_pcie_resume_noirq(struct dw_pcie *pci)
 	pci->suspended = false;
 
 	return 0;
-
-err_stop_link:
-	dw_pcie_stop_link(pci);
 
 err_deinit:
 	if (pci->pp.ops->deinit)
