@@ -379,6 +379,7 @@ struct qcom_pcie_cfg {
 	bool has_ext_parf_regs;
 	bool has_link_down_recovery;
 	bool l2_mem_vote;
+	bool async_pm;
 };
 
 struct qcom_pcie_perst {
@@ -1903,6 +1904,7 @@ static const struct qcom_pcie_cfg cfg_sc8280xp = {
 	.override_no_snoop = true,
 	.has_ext_parf_regs = true,
 	.l2_mem_vote = true,
+	.async_pm = true,
 };
 
 static const struct qcom_pcie_cfg cfg_sc8280xp_link_down = {
@@ -1912,6 +1914,7 @@ static const struct qcom_pcie_cfg cfg_sc8280xp_link_down = {
 	.has_ext_parf_regs = true,
 	.has_link_down_recovery = true,
 	.l2_mem_vote = true,
+	.async_pm = true,
 };
 
 static const struct qcom_pcie_cfg cfg_x1e80100 = {
@@ -3008,6 +3011,16 @@ static int qcom_pcie_probe(struct platform_device *pdev)
 		dev_err(dev, "No platform ops\n");
 		return -ENODATA;
 	}
+
+	/*
+	 * Each controller retrains its link in its noirq resume, which can take
+	 * most of a second, so let them suspend and resume in parallel where
+	 * nothing makes one wait for another. Elsewhere the slot power control
+	 * can depend on a device, like an I2C controller, that only the order of
+	 * the PM list puts before the controller.
+	 */
+	if (pcie_cfg->async_pm)
+		device_enable_async_suspend(dev);
 
 	pm_runtime_enable(dev);
 	ret = pm_runtime_get_sync(dev);
