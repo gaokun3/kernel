@@ -2518,6 +2518,25 @@ static void ath11k_core_post_reconfigure_recovery(struct ath11k_base *ab)
 	complete(&ab->driver_recovery);
 }
 
+static void ath11k_core_end_reset_without_restart(struct ath11k_base *ab)
+{
+	struct ath11k *ar;
+	int radio_index;
+
+	for (radio_index = 0; radio_index < ab->num_radios; radio_index++) {
+		ar = ab->pdevs[radio_index].ar;
+		if (ar && (ar->state == ATH11K_STATE_RESTARTING ||
+			   ar->state == ATH11K_STATE_RESTARTED))
+			return;
+	}
+
+	atomic_dec(&ab->reset_count);
+	complete(&ab->reset_complete);
+	ab->is_reset = false;
+	atomic_set(&ab->fail_cont_count, 0);
+	__pm_relax(ab->recovery_ws);
+}
+
 static void ath11k_core_restart(struct work_struct *work)
 {
 	struct ath11k_base *ab = container_of(work, struct ath11k_base, restart_work);
@@ -2537,6 +2556,8 @@ static void ath11k_core_restart(struct work_struct *work)
 
 	if (!ab->is_reset)
 		ath11k_core_post_reconfigure_recovery(ab);
+	else
+		ath11k_core_end_reset_without_restart(ab);
 
 	complete(&ab->restart_completed);
 }
