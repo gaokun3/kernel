@@ -1192,6 +1192,7 @@ static void ath11k_pci_remove(struct pci_dev *pdev)
 	set_bit(ATH11K_FLAG_UNREGISTERING, &ab->dev_flags);
 
 	cancel_work_sync(&ab->reset_work);
+	cancel_delayed_work_sync(&ab->reset_retry_work);
 	cancel_work_sync(&ab->dump_work);
 	ath11k_core_deinit(ab);
 
@@ -1220,6 +1221,7 @@ static void ath11k_pci_shutdown(struct pci_dev *pdev)
 	spin_unlock_bh(&ab->base_lock);
 
 	cancel_work_sync(&ab->reset_work);
+	cancel_delayed_work_sync(&ab->reset_retry_work);
 	cancel_work_sync(&ab->dump_work);
 
 	ath11k_pci_power_down(ab, false);

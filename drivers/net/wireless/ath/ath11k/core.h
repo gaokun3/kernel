@@ -66,9 +66,10 @@ extern bool ath11k_ftm_mode;
 
 #define ATH11K_MON_TIMER_INTERVAL  10
 #define ATH11K_RESET_TIMEOUT_HZ (20 * HZ)
-#define ATH11K_RESET_MAX_FAIL_COUNT_FIRST 3
-#define ATH11K_RESET_MAX_FAIL_COUNT_FINAL 5
-#define ATH11K_RESET_FAIL_TIMEOUT_HZ (20 * HZ)
+#define ATH11K_RESET_LOOP_WINDOW_SEC (10 * 60)
+#define ATH11K_RESET_LOOP_FREE 2
+#define ATH11K_RESET_LOOP_MAX 6
+#define ATH11K_RESET_LOOP_BACKOFF_SEC 30
 #define ATH11K_RECONFIGURE_TIMEOUT_HZ (10 * HZ)
 #define ATH11K_RECOVER_START_TIMEOUT_HZ (20 * HZ)
 #define ATH11K_RECOVERY_WAKEUP_MS (60 * MSEC_PER_SEC)
@@ -1036,9 +1037,9 @@ struct ath11k_base {
 	struct completion reset_complete;
 	struct completion reconfigure_complete;
 	struct completion recovery_start;
-	/* continuous recovery fail count */
-	atomic_t fail_cont_count;
-	unsigned long reset_fail_timeout;
+	struct delayed_work reset_retry_work;
+	unsigned int reset_loop;
+	time64_t reset_time;
 	struct {
 		/* protected by data_lock */
 		u32 fw_crash_counter;

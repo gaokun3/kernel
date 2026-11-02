@@ -2535,7 +2535,6 @@ static void ath11k_core_end_reset_without_restart(struct ath11k_base *ab)
 	atomic_dec(&ab->reset_count);
 	complete(&ab->reset_complete);
 	ab->is_reset = false;
-	atomic_set(&ab->fail_cont_count, 0);
 	__pm_relax(ab->recovery_ws);
 }
 
@@ -2564,10 +2563,47 @@ static void ath11k_core_restart(struct work_struct *work)
 	complete(&ab->restart_completed);
 }
 
+static bool ath11k_core_reset_allowed(struct ath11k_base *ab)
+{
+	time64_t now = ktime_get_boottime_seconds();
+	time64_t hold;
+
+	if (now - ab->reset_time >= ATH11K_RESET_LOOP_WINDOW_SEC)
+		ab->reset_loop = 0;
+
+	if (ab->reset_loop >= ATH11K_RESET_LOOP_MAX) {
+		ath11k_err(ab, "firmware crashed again after %u resets, giving up\n",
+			   ab->reset_loop);
+		ab->reset_time = now;
+		__pm_relax(ab->recovery_ws);
+		return false;
+	}
+
+	if (ab->reset_loop >= ATH11K_RESET_LOOP_FREE) {
+		hold = ab->reset_time - now +
+		       (ATH11K_RESET_LOOP_BACKOFF_SEC <<
+			(ab->reset_loop - ATH11K_RESET_LOOP_FREE));
+		if (hold > 0) {
+			ath11k_warn(ab, "firmware crashed again after %u resets, next one in %lld s\n",
+				    ab->reset_loop, hold);
+			set_bit(ATH11K_FLAG_CRASH_PENDING, &ab->dev_flags);
+			__pm_relax(ab->recovery_ws);
+			queue_delayed_work(ab->workqueue_aux, &ab->reset_retry_work,
+					   secs_to_jiffies(hold));
+			return false;
+		}
+	}
+
+	ab->reset_loop++;
+	ab->reset_time = now;
+
+	return true;
+}
+
 static void ath11k_core_reset(struct work_struct *work)
 {
 	struct ath11k_base *ab = container_of(work, struct ath11k_base, reset_work);
-	int reset_count, fail_cont_count;
+	int reset_count;
 
 	if (!(test_bit(ATH11K_FLAG_REGISTERED, &ab->dev_flags))) {
 		ath11k_warn(ab, "ignore reset dev flags 0x%lx\n", ab->dev_flags);
@@ -2576,16 +2612,7 @@ static void ath11k_core_reset(struct work_struct *work)
 
 	pm_wakeup_ws_event(ab->recovery_ws, ATH11K_RECOVERY_WAKEUP_MS, false);
 
-	/* Sometimes the recovery will fail and then the next all recovery fail,
-	 * this is to avoid infinite recovery since it can not recovery success.
-	 */
-	fail_cont_count = atomic_read(&ab->fail_cont_count);
-
-	if (fail_cont_count >= ATH11K_RESET_MAX_FAIL_COUNT_FINAL)
-		return;
-
-	if (fail_cont_count >= ATH11K_RESET_MAX_FAIL_COUNT_FIRST &&
-	    time_before(jiffies, ab->reset_fail_timeout))
+	if (!ath11k_core_reset_allowed(ab))
 		return;
 
 	reinit_completion(&ab->reset_complete);
@@ -2594,13 +2621,8 @@ static void ath11k_core_reset(struct work_struct *work)
 	if (reset_count > 1) {
 		ath11k_warn(ab, "already resetting count %d\n", reset_count);
 
-		if (!wait_for_completion_timeout(&ab->reset_complete,
-						 ATH11K_RESET_TIMEOUT_HZ)) {
-			ab->reset_fail_timeout = jiffies + ATH11K_RESET_FAIL_TIMEOUT_HZ;
-			/* Record the continuous recovery fail count when recovery failed*/
-			atomic_inc(&ab->fail_cont_count);
-		}
-
+		wait_for_completion_timeout(&ab->reset_complete,
+					    ATH11K_RESET_TIMEOUT_HZ);
 		flush_work(&ab->restart_work);
 
 		if (test_bit(ATH11K_FLAG_SYSTEM_SUSPEND, &ab->dev_flags)) {
@@ -2670,6 +2692,18 @@ void ath11k_core_schedule_reset(struct ath11k_base *ab)
 		ath11k_core_queue_reset(ab);
 }
 EXPORT_SYMBOL(ath11k_core_schedule_reset);
+
+static void ath11k_core_reset_retry(struct work_struct *work)
+{
+	struct ath11k_base *ab = container_of(work, struct ath11k_base,
+					      reset_retry_work.work);
+
+	spin_lock_bh(&ab->base_lock);
+	if (test_bit(ATH11K_FLAG_CRASH_PENDING, &ab->dev_flags) &&
+	    !test_bit(ATH11K_FLAG_UNREGISTERING, &ab->dev_flags))
+		ath11k_core_schedule_reset(ab);
+	spin_unlock_bh(&ab->base_lock);
+}
 
 static int ath11k_init_hw_params(struct ath11k_base *ab)
 {
@@ -2859,6 +2893,7 @@ struct ath11k_base *ath11k_core_alloc(struct device *dev, size_t priv_size,
 	INIT_WORK(&ab->restart_work, ath11k_core_restart);
 	INIT_WORK(&ab->update_11d_work, ath11k_update_11d);
 	INIT_WORK(&ab->reset_work, ath11k_core_reset);
+	INIT_DELAYED_WORK(&ab->reset_retry_work, ath11k_core_reset_retry);
 	INIT_WORK(&ab->dump_work, ath11k_coredump_upload);
 	timer_setup(&ab->rx_replenish_retry, ath11k_ce_rx_replenish_retry, 0);
 	init_completion(&ab->htc_suspend);

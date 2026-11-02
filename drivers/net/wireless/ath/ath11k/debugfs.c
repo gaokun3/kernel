@@ -410,6 +410,7 @@ static ssize_t ath11k_write_simulate_fw_crash(struct file *file,
 						   ATH11K_WMI_FW_HANG_DELAY);
 	} else if (!strcmp(buf, "hw-restart")) {
 		ath11k_info(ab, "user requested hw restart\n");
+		ab->reset_loop = 0;
 		ath11k_core_schedule_reset(ab);
 		ret = 0;
 	} else {
