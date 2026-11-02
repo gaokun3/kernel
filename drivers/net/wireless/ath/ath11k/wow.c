@@ -695,10 +695,23 @@ static void ath11k_wow_resume_crashed(struct ath11k *ar)
 		ath11k_hif_irq_enable(ab);
 }
 
+static bool ath11k_wow_rings_ready(struct ath11k_base *ab)
+{
+	bool ready;
+
+	mutex_lock(&ab->core_lock);
+	ready = !test_bit(ATH11K_FLAG_CRASH_FLUSH, &ab->dev_flags) &&
+		ath11k_dp_rx_mon_status_allocated(ab);
+	mutex_unlock(&ab->core_lock);
+
+	return ready;
+}
+
 int ath11k_wow_op_suspend(struct ieee80211_hw *hw,
 			  struct cfg80211_wowlan *wowlan)
 {
 	struct ath11k *ar = hw->priv;
+	bool rings_ready;
 	int ret;
 
 	ret = ath11k_mac_wait_tx_complete(ar);
@@ -707,9 +720,11 @@ int ath11k_wow_op_suspend(struct ieee80211_hw *hw,
 		return ret;
 	}
 
+	rings_ready = ath11k_wow_rings_ready(ar->ab);
+
 	mutex_lock(&ar->conf_mutex);
 
-	if (ar->state != ATH11K_STATE_ON) {
+	if (ar->state != ATH11K_STATE_ON || !rings_ready) {
 		ath11k_warn(ar->ab, "device state %d, suspending without wow\n",
 			    ar->state);
 		ret = -EBUSY;

@@ -2531,10 +2531,10 @@ static void ath11k_core_end_reset_without_restart(struct ath11k_base *ab)
 			return;
 	}
 
-	atomic_dec(&ab->reset_count);
-	complete(&ab->reset_complete);
 	ab->is_reset = false;
 	__pm_relax(ab->recovery_ws);
+	atomic_dec(&ab->reset_count);
+	complete(&ab->reset_complete);
 }
 
 static void ath11k_core_restart(struct work_struct *work)
@@ -2674,6 +2674,7 @@ void ath11k_core_schedule_reset(struct ath11k_base *ab)
 
 	set_bit(ATH11K_FLAG_CRASH_FLUSH, &ab->dev_flags);
 	wake_up(&ab->wmi_ab.tx_credits_wq);
+	complete_all(&ab->reconfigure_complete);
 	for (radio_index = 0; radio_index < ab->num_radios; radio_index++) {
 		ar = ab->pdevs[radio_index].ar;
 		if (!ar)

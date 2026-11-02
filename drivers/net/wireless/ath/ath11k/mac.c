@@ -6631,6 +6631,12 @@ static void ath11k_mac_wait_reconfigure(struct ath11k_base *ab)
 				    ATH11K_RECONFIGURE_TIMEOUT_HZ);
 }
 
+static bool ath11k_mac_crashed_in_restart(struct ath11k *ar)
+{
+	return ar->state == ATH11K_STATE_RESTARTED &&
+	       test_bit(ATH11K_FLAG_CRASH_FLUSH, &ar->ab->dev_flags);
+}
+
 static int ath11k_mac_op_start(struct ieee80211_hw *hw)
 {
 	struct ath11k *ar = hw->priv;
@@ -6759,7 +6765,11 @@ static int ath11k_mac_op_start(struct ieee80211_hw *hw)
 	return 0;
 
 err:
-	ar->state = ATH11K_STATE_OFF;
+	if (ath11k_mac_crashed_in_restart(ar))
+		ret = 0;
+	else
+		ar->state = ATH11K_STATE_OFF;
+
 	mutex_unlock(&ar->conf_mutex);
 
 	return ret;
@@ -7348,10 +7358,13 @@ err_peer_del:
 err_vdev_del:
 	ath11k_mac_vdev_delete(ar, arvif);
 	spin_lock_bh(&ar->data_lock);
-	list_del(&arvif->list);
+	list_del_init(&arvif->list);
 	spin_unlock_bh(&ar->data_lock);
 
 err:
+	if (ath11k_mac_crashed_in_restart(ar))
+		ret = 0;
+
 	mutex_unlock(&ar->conf_mutex);
 
 	return ret;
@@ -9273,6 +9286,7 @@ ath11k_mac_op_reconfig_complete(struct ieee80211_hw *hw,
 	struct ath11k_base *ab = ar->ab;
 	int recovery_count;
 	struct ath11k_vif *arvif;
+	bool crashed;
 
 	if (reconfig_type != IEEE80211_RECONFIG_TYPE_RESTART)
 		return;
@@ -9280,8 +9294,13 @@ ath11k_mac_op_reconfig_complete(struct ieee80211_hw *hw,
 	mutex_lock(&ar->conf_mutex);
 
 	if (ar->state == ATH11K_STATE_RESTARTED) {
-		ath11k_warn(ar->ab, "pdev %d successfully recovered\n",
-			    ar->pdev->pdev_id);
+		crashed = test_bit(ATH11K_FLAG_CRASH_FLUSH, &ab->dev_flags);
+		if (crashed)
+			ath11k_warn(ab, "pdev %d restarted without firmware\n",
+				    ar->pdev->pdev_id);
+		else
+			ath11k_warn(ab, "pdev %d successfully recovered\n",
+				    ar->pdev->pdev_id);
 		ar->state = ATH11K_STATE_ON;
 		ieee80211_wake_queues(ar->hw);
 
@@ -9298,9 +9317,12 @@ ath11k_mac_op_reconfig_complete(struct ieee80211_hw *hw,
 			 */
 			if (recovery_count == ab->num_radios) {
 				ab->is_reset = false;
-				__pm_relax(ab->recovery_ws);
-				pm_wakeup_ws_event(ab->recovery_ws,
-						   ATH11K_RECOVERY_SETTLE_MS, false);
+				if (!crashed) {
+					__pm_relax(ab->recovery_ws);
+					pm_wakeup_ws_event(ab->recovery_ws,
+							   ATH11K_RECOVERY_SETTLE_MS,
+							   false);
+				}
 				atomic_dec(&ab->reset_count);
 				complete(&ab->reset_complete);
 				ath11k_dbg(ab, ATH11K_DBG_BOOT, "reset success\n");

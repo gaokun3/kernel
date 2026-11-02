@@ -1182,6 +1182,7 @@ static void ath11k_pci_remove(struct pci_dev *pdev)
 	ath11k_pci_set_irq_affinity_hint(ab_pci, NULL);
 
 	if (test_bit(ATH11K_FLAG_QMI_FAIL, &ab->dev_flags)) {
+		cancel_delayed_work_sync(&ab->reset_retry_work);
 		ath11k_pci_power_down(ab, false);
 		ath11k_debugfs_soc_destroy(ab);
 		ath11k_qmi_deinit_service(ab);
@@ -1189,7 +1190,9 @@ static void ath11k_pci_remove(struct pci_dev *pdev)
 		goto qmi_fail;
 	}
 
+	spin_lock_bh(&ab->base_lock);
 	set_bit(ATH11K_FLAG_UNREGISTERING, &ab->dev_flags);
+	spin_unlock_bh(&ab->base_lock);
 
 	cancel_work_sync(&ab->reset_work);
 	cancel_delayed_work_sync(&ab->reset_retry_work);

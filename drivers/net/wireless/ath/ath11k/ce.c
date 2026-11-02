@@ -701,8 +701,13 @@ void ath11k_ce_poll_send_completed(struct ath11k_base *ab, u8 pipe_id)
 	struct ath11k_ce_pipe *pipe = &ab->ce.ce_pipe[pipe_id];
 	const struct ce_attr *attr =  &ab->hw_params.host_ce_config[pipe_id];
 
-	if ((pipe->attr_flags & CE_ATTR_DIS_INTR) && attr->src_nentries)
-		ath11k_ce_tx_process_cb(pipe);
+	if (!(pipe->attr_flags & CE_ATTR_DIS_INTR) || !attr->src_nentries)
+		return;
+
+	if (!ab->hal.srng_list[pipe->src_ring->hal_ring_id].initialized)
+		return;
+
+	ath11k_ce_tx_process_cb(pipe);
 }
 EXPORT_SYMBOL(ath11k_ce_per_engine_service);
 
