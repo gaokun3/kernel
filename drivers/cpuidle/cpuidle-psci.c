@@ -13,6 +13,7 @@
 #include <linux/cpuidle.h>
 #include <linux/cpumask.h>
 #include <linux/cpu_pm.h>
+#include <linux/delay.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/of.h>
@@ -61,6 +62,17 @@ static inline void psci_clear_domain_state(void)
 	__this_cpu_write(psci_domain_state.state, 0);
 }
 
+/*
+ * In s2idle, when the firmware denies (PSCI DENIED) a CPU's request for the
+ * cluster state, that CPU returns and asks again within microseconds. Traces
+ * on SC8280XP show the other CPUs still inside CPU_SUSPEND then, counted as off
+ * by genpd, so the CPU is the last one again and asks for the cluster again.
+ * Such a ring can last until the next wakeup. Wait a few milliseconds before
+ * asking again. Other failures, such as a return without powering down
+ * (-EOPNOTSUPP), don't wait.
+ */
+#define PSCI_S2IDLE_DENIED_DELAY_US	3000
+
 static __cpuidle int __psci_enter_domain_idle_state(struct cpuidle_device *dev,
 						    struct cpuidle_driver *drv, int idx,
 						    bool s2idle)
@@ -70,7 +82,7 @@ static __cpuidle int __psci_enter_domain_idle_state(struct cpuidle_device *dev,
 	struct device *pd_dev = data->dev;
 	struct psci_cpuidle_domain_state *ds;
 	u32 state = states[idx];
-	int ret;
+	int ret, rc;
 
 	ret = cpu_pm_enter();
 	if (ret)
@@ -87,7 +99,8 @@ static __cpuidle int __psci_enter_domain_idle_state(struct cpuidle_device *dev,
 		state = ds->state;
 
 	trace_psci_domain_idle_enter(dev->cpu, state, s2idle);
-	ret = psci_cpu_suspend_enter(state) ? -1 : idx;
+	rc = psci_cpu_suspend_enter(state);
+	ret = rc ? -1 : idx;
 	trace_psci_domain_idle_exit(dev->cpu, state, s2idle);
 
 	if (s2idle)
@@ -98,8 +111,11 @@ static __cpuidle int __psci_enter_domain_idle_state(struct cpuidle_device *dev,
 	cpu_pm_exit();
 
 	/* Correct domain-idlestate statistics if we failed to enter. */
-	if (ret == -1 && ds->state)
+	if (ret == -1 && ds->state) {
 		pm_genpd_inc_rejected(ds->pd, ds->state_idx);
+		if (s2idle && rc == -EPERM)
+			udelay(PSCI_S2IDLE_DENIED_DELAY_US);
+	}
 
 	/* Clear the domain state to start fresh when back from idle. */
 	psci_clear_domain_state();
