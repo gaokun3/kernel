@@ -1235,10 +1235,28 @@ static int dw_pcie_pme_turn_off(struct dw_pcie *pci)
 	return 0;
 }
 
+/*
+ * Return the requester ID of a PME that the Root Port received and nothing has
+ * handled, or -1. For system suspend, pcie_pme_suspend() turns the PME
+ * interrupt off unless it can wake the system, which an MSI through a GIC ITS
+ * can't. The PCI core clears the bit on resume, see
+ * pcie_pme_root_status_cleanup().
+ */
+static int dw_pcie_pme_received(struct dw_pcie *pci)
+{
+	u8 offset = dw_pcie_find_capability(pci, PCI_CAP_ID_EXP);
+	u32 val = dw_pcie_readl_dbi(pci, offset + PCI_EXP_RTSTA);
+
+	if (PCI_POSSIBLE_ERROR(val) || !(val & PCI_EXP_RTSTA_PME))
+		return -1;
+
+	return FIELD_GET(PCI_EXP_RTSTA_PME_RQ_ID, val);
+}
+
 int dw_pcie_suspend_noirq(struct dw_pcie *pci)
 {
 	bool pme_capable = false;
-	int ret = 0;
+	int ret = 0, rid;
 	u32 val;
 
 	pci->link_up_at_suspend = dw_pcie_link_up(pci);
@@ -1247,6 +1265,29 @@ int dw_pcie_suspend_noirq(struct dw_pcie *pci)
 
 	if (!pci_host_common_d3cold_possible(pci->pp.bridge, &pme_capable))
 		return 0;
+
+	/*
+	 * A device has asked to wake the system. Turning the link off now
+	 * races with that: an endpoint that has just sent PME may never
+	 * acknowledge PME_Turn_Off, and powering it down regardless can leave
+	 * it unable to bring the link back. Abort the suspend instead, and
+	 * report the wakeup on the device as the PME service would have.
+	 */
+	rid = dw_pcie_pme_received(pci);
+	if (rid >= 0) {
+		int domain = pci_domain_nr(pci->pp.bridge->bus);
+		struct pci_dev *pdev;
+
+		pdev = pci_get_domain_bus_and_slot(domain, PCI_BUS_NUM(rid),
+						   rid & 0xff);
+		if (pdev) {
+			pci_wakeup_event(pdev);
+			pci_dev_put(pdev);
+		}
+		dev_info(pci->dev, "PME from %02x:%02x.%d, aborting suspend\n",
+			 PCI_BUS_NUM(rid), PCI_SLOT(rid), PCI_FUNC(rid));
+		return -EBUSY;
+	}
 
 	if (pci->pp.ops->pme_turn_off) {
 		pci->pp.ops->pme_turn_off(&pci->pp);
