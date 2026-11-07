@@ -11,6 +11,7 @@
 #include "iris_instance.h"
 #include "iris_vdec.h"
 #include "iris_vpu_buffer.h"
+#include "iris_vpu_common.h"
 
 static void iris_hfi_gen1_read_changed_params(struct iris_inst *inst,
 					      struct hfi_msg_event_notify_pkt *pkt)
@@ -688,6 +689,15 @@ static void iris_hfi_gen1_flush_debug_queue(struct iris_core *core, u8 *packet)
 
 void iris_hfi_gen1_response_handler(struct iris_core *core)
 {
+	if (iris_vpu_watchdog(core, core->intr_status)) {
+		struct hfi_msg_event_notify_pkt pkt = {.event_id = HFI_EVENT_SYS_ERROR};
+
+		dev_err(core->dev, "cpu watchdog error received\n");
+		iris_hfi_gen1_sys_event_notify(core, &pkt);
+
+		return;
+	}
+
 	memset(core->response_packet, 0, sizeof(struct hfi_pkt_hdr));
 	while (!iris_hfi_queue_msg_read(core, core->response_packet)) {
 		iris_hfi_gen1_handle_response(core, core->response_packet);
