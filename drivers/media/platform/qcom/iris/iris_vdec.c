@@ -401,7 +401,7 @@ int iris_vdec_streamon_output(struct iris_inst *inst)
 	const struct iris_hfi_session_ops *hfi_ops = inst->hfi_session_ops;
 	int ret;
 
-	if (!inst->seek_resume) {
+	if (!inst->seek_resume || inst->sub_state & IRIS_INST_SUB_FIRST_IPSC) {
 		ret = hfi_ops->session_set_config_params(inst, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
 		if (ret)
 			return ret;
