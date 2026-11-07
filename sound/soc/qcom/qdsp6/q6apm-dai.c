@@ -219,6 +219,7 @@ static int q6apm_dai_prepare(struct snd_soc_component *component,
 	struct audioreach_module_config cfg;
 	struct device *dev = component->dev;
 	struct q6apm_dai_data *pdata;
+	unsigned int i;
 	int ret;
 
 	pdata = snd_soc_component_get_drvdata(component);
@@ -235,7 +236,19 @@ static int q6apm_dai_prepare(struct snd_soc_component *component,
 	cfg.num_channels = runtime->channels;
 	cfg.bit_width = prtd->bits_per_sample;
 	cfg.fmt = SND_AUDIOCODEC_PCM;
-	audioreach_set_default_channel_mapping(cfg.channel_map, runtime->channels);
+	/*
+	 * Capture sources number their channels in order, 1..n (seen with
+	 * SC8280XP's VA codec DMA; other back ends untested). The default map is a
+	 * speaker layout (FL FR LS RS for four channels), against which the MFC
+	 * would mix the third channel into the first two and move the fourth.
+	 */
+	if (substream->stream == SNDRV_PCM_STREAM_CAPTURE) {
+		for (i = 0; i < runtime->channels; i++)
+			cfg.channel_map[i] = PCM_CHANNEL_FL + i;
+	} else {
+		audioreach_set_default_channel_mapping(cfg.channel_map,
+						       runtime->channels);
+	}
 	if (prtd->state) {
 		/* clear the previous setup if any  */
 		q6apm_graph_stop(prtd->graph);
