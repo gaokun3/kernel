@@ -14,6 +14,7 @@
 
 #include <drm/drm_atomic.h>
 #include <drm/drm_blend.h>
+#include <drm/drm_color_mgmt.h>
 #include <drm/drm_crtc.h>
 #include <drm/drm_flip_work.h>
 #include <drm/drm_framebuffer.h>
@@ -40,9 +41,6 @@
 
 /* timeout in ms waiting for frame done */
 #define DPU_CRTC_FRAME_DONE_TIMEOUT_MS	60
-
-#define	CONVERT_S3_15(val) \
-	(((((u64)val) & ~BIT_ULL(63)) >> 17) & GENMASK_ULL(17, 0))
 
 static struct dpu_kms *_dpu_crtc_get_kms(struct drm_crtc *crtc)
 {
@@ -790,10 +788,17 @@ static int _dpu_crtc_check_and_setup_lm_bounds(struct drm_crtc *crtc,
 	return 0;
 }
 
+static u32 _dpu_crtc_pcc_s3_15(s64 val)
+{
+	return clamp_t(s64, val, -BIT(17), BIT(17) - 1) & GENMASK(17, 0);
+}
+
 static void _dpu_crtc_get_pcc_coeff(struct drm_crtc_state *state,
 		struct dpu_hw_pcc_cfg *cfg)
 {
 	struct drm_color_ctm *ctm;
+	s64 m[9];
+	int i;
 
 	memset(cfg, 0, sizeof(struct dpu_hw_pcc_cfg));
 
@@ -802,17 +807,20 @@ static void _dpu_crtc_get_pcc_coeff(struct drm_crtc_state *state,
 	if (!ctm)
 		return;
 
-	cfg->r.r = CONVERT_S3_15(ctm->matrix[0]);
-	cfg->g.r = CONVERT_S3_15(ctm->matrix[1]);
-	cfg->b.r = CONVERT_S3_15(ctm->matrix[2]);
+	for (i = 0; i < ARRAY_SIZE(m); i++)
+		m[i] = (s64)drm_color_ctm_s31_32_to_qm_n(ctm->matrix[i], 3, 15);
 
-	cfg->r.g = CONVERT_S3_15(ctm->matrix[3]);
-	cfg->g.g = CONVERT_S3_15(ctm->matrix[4]);
-	cfg->b.g = CONVERT_S3_15(ctm->matrix[5]);
+	cfg->r.r = _dpu_crtc_pcc_s3_15(m[0]);
+	cfg->r.g = _dpu_crtc_pcc_s3_15(m[1]);
+	cfg->r.b = _dpu_crtc_pcc_s3_15(m[2]);
 
-	cfg->r.b = CONVERT_S3_15(ctm->matrix[6]);
-	cfg->g.b = CONVERT_S3_15(ctm->matrix[7]);
-	cfg->b.b = CONVERT_S3_15(ctm->matrix[8]);
+	cfg->g.r = _dpu_crtc_pcc_s3_15(m[3]);
+	cfg->g.g = _dpu_crtc_pcc_s3_15(m[4]);
+	cfg->g.b = _dpu_crtc_pcc_s3_15(m[5]);
+
+	cfg->b.r = _dpu_crtc_pcc_s3_15(m[6]);
+	cfg->b.g = _dpu_crtc_pcc_s3_15(m[7]);
+	cfg->b.b = _dpu_crtc_pcc_s3_15(m[8]);
 }
 
 static void _dpu_crtc_get_gc_lut(struct drm_crtc_state *state,
