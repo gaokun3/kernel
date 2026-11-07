@@ -42,6 +42,10 @@
 /* timeout in ms waiting for frame done */
 #define DPU_CRTC_FRAME_DONE_TIMEOUT_MS	60
 
+static bool panel_calibration = true;
+MODULE_PARM_DESC(panel_calibration, "Apply the factory calibration of the built-in panel");
+module_param(panel_calibration, bool, 0644);
+
 static struct dpu_kms *_dpu_crtc_get_kms(struct drm_crtc *crtc)
 {
 	struct msm_drm_private *priv = crtc->dev->dev_private;
@@ -788,13 +792,54 @@ static int _dpu_crtc_check_and_setup_lm_bounds(struct drm_crtc *crtc,
 	return 0;
 }
 
+static const s32 *_dpu_crtc_panel_cal(struct drm_crtc_state *state)
+{
+	struct drm_crtc *crtc = state->crtc;
+	struct dpu_kms *dpu_kms = _dpu_crtc_get_kms(crtc);
+	struct drm_connector *connector = dpu_kms->panel_connector;
+	struct drm_encoder *encoder;
+
+	if (!dpu_kms->has_panel_cal || !READ_ONCE(panel_calibration))
+		return NULL;
+
+	drm_for_each_encoder_mask(encoder, crtc->dev, state->encoder_mask) {
+		if (encoder->encoder_type != DRM_MODE_ENCODER_DSI)
+			continue;
+		if (connector &&
+		    connector->state->colorspace == DRM_MODE_COLORIMETRY_DCI_P3_RGB_D65)
+			return dpu_kms->panel_cal[DPU_PANEL_CAL_P3];
+		return dpu_kms->panel_cal[DPU_PANEL_CAL_SRGB];
+	}
+
+	return NULL;
+}
+
 static u32 _dpu_crtc_pcc_s3_15(s64 val)
 {
 	return clamp_t(s64, val, -BIT(17), BIT(17) - 1) & GENMASK(17, 0);
 }
 
+/* The calibration corrects the panel, so it comes after the CTM */
+static void _dpu_crtc_apply_panel_cal(const s32 *cal, s64 *m)
+{
+	s64 out[DPU_PANEL_CAL_LEN];
+	int i, r, c;
+
+	for (r = 0; r < 3; r++) {
+		for (c = 0; c < 3; c++) {
+			s64 sum = 0;
+
+			for (i = 0; i < 3; i++)
+				sum += cal[r * 3 + i] * m[i * 3 + c];
+			out[r * 3 + c] = sum >> 15;
+		}
+	}
+
+	memcpy(m, out, sizeof(out));
+}
+
 static void _dpu_crtc_get_pcc_coeff(struct drm_crtc_state *state,
-		struct dpu_hw_pcc_cfg *cfg)
+		const s32 *cal, struct dpu_hw_pcc_cfg *cfg)
 {
 	struct drm_color_ctm *ctm;
 	s64 m[9];
@@ -809,6 +854,9 @@ static void _dpu_crtc_get_pcc_coeff(struct drm_crtc_state *state,
 
 	for (i = 0; i < ARRAY_SIZE(m); i++)
 		m[i] = (s64)drm_color_ctm_s31_32_to_qm_n(ctm->matrix[i], 3, 15);
+
+	if (cal)
+		_dpu_crtc_apply_panel_cal(cal, m);
 
 	cfg->r.r = _dpu_crtc_pcc_s3_15(m[0]);
 	cfg->r.g = _dpu_crtc_pcc_s3_15(m[1]);
@@ -857,6 +905,8 @@ static void _dpu_crtc_setup_cp_blocks(struct drm_crtc *crtc)
 	struct drm_crtc_state *state = crtc->state;
 	struct dpu_crtc_state *cstate = to_dpu_crtc_state(crtc->state);
 	struct dpu_crtc_mixer *mixer = cstate->mixers;
+	struct dpu_crtc *dpu_crtc = to_dpu_crtc(crtc);
+	const s32 *cal = _dpu_crtc_panel_cal(state);
 	struct dpu_hw_pcc_cfg cfg;
 	struct dpu_hw_gc_lut *gc_lut;
 	struct dpu_hw_ctl *ctl;
@@ -864,8 +914,11 @@ static void _dpu_crtc_setup_cp_blocks(struct drm_crtc *crtc)
 	int i;
 
 
-	if (!state->color_mgmt_changed && !drm_atomic_crtc_needs_modeset(state))
+	if (!state->color_mgmt_changed && !drm_atomic_crtc_needs_modeset(state) &&
+	    cal == dpu_crtc->pcc_cal)
 		return;
+
+	dpu_crtc->pcc_cal = cal;
 
 	for (i = 0; i < cstate->num_mixers; i++) {
 		ctl = mixer[i].lm_ctl;
@@ -878,7 +931,7 @@ static void _dpu_crtc_setup_cp_blocks(struct drm_crtc *crtc)
 			if (!state->ctm) {
 				dspp->ops.setup_pcc(dspp, NULL);
 			} else {
-				_dpu_crtc_get_pcc_coeff(state, &cfg);
+				_dpu_crtc_get_pcc_coeff(state, cal, &cfg);
 				dspp->ops.setup_pcc(dspp, &cfg);
 			}
 

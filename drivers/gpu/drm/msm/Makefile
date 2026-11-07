@@ -95,6 +95,7 @@ msm-display-$(CONFIG_DRM_MSM_DPU) += \
 	disp/dpu1/dpu_hw_vbif.o \
 	disp/dpu1/dpu_hw_wb.o \
 	disp/dpu1/dpu_kms.o \
+	disp/dpu1/dpu_panel_cal.o \
 	disp/dpu1/dpu_plane.o \
 	disp/dpu1/dpu_rm.o \
 	disp/dpu1/dpu_vbif.o \
