@@ -90,6 +90,7 @@ static int sc8280xp_be_hw_params_fixup(struct snd_soc_pcm_runtime *rtd,
 	struct snd_interval *channels = hw_param_interval(params,
 					SNDRV_PCM_HW_PARAM_CHANNELS);
 	struct snd_mask *fmt = hw_param_mask(params, SNDRV_PCM_HW_PARAM_FORMAT);
+	unsigned int fe_channels = params_channels(params);
 
 	rate->min = rate->max = 48000;
 	snd_mask_set_format(fmt, SNDRV_PCM_FORMAT_S16_LE);
@@ -101,6 +102,11 @@ static int sc8280xp_be_hw_params_fixup(struct snd_soc_pcm_runtime *rtd,
 	case TX_CODEC_DMA_TX_2:
 	case TX_CODEC_DMA_TX_3:
 		channels->min = 1;
+		break;
+	case VA_CODEC_DMA_TX_0:
+		/* Up to four decimators, one per channel, if the FE asks. */
+		if (fe_channels == 4)
+			channels->min = channels->max = 4;
 		break;
 	default:
 		break;
