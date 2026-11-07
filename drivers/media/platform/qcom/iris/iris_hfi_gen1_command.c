@@ -874,15 +874,28 @@ static int iris_hfi_gen1_set_raw_format(struct iris_inst *inst, u32 plane)
 		pixelformat = inst->fmt_dst->fmt.pix_mp.pixelformat;
 		if (iris_split_mode_enabled(inst)) {
 			fmt.buffer_type = HFI_BUFFER_OUTPUT;
-			fmt.format = HFI_COLOR_FORMAT_NV12_UBWC;
+			fmt.format = iris_fmt_is_10bit(pixelformat) ?
+				HFI_COLOR_FORMAT_YUV420_TP10_UBWC : HFI_COLOR_FORMAT_NV12_UBWC;
 
 			ret = hfi_gen1_set_property(inst, ptype, &fmt, sizeof(fmt));
 			if (ret)
 				return ret;
 
 			fmt.buffer_type = HFI_BUFFER_OUTPUT2;
-			fmt.format = pixelformat == V4L2_PIX_FMT_NV12 ?
-				HFI_COLOR_FORMAT_NV12 : HFI_COLOR_FORMAT_NV12_UBWC;
+			switch (pixelformat) {
+			case V4L2_PIX_FMT_NV12:
+				fmt.format = HFI_COLOR_FORMAT_NV12;
+				break;
+			case V4L2_PIX_FMT_P010:
+				fmt.format = HFI_COLOR_FORMAT_P010;
+				break;
+			case V4L2_PIX_FMT_QC10C:
+				fmt.format = HFI_COLOR_FORMAT_YUV420_TP10_UBWC;
+				break;
+			default:
+				fmt.format = HFI_COLOR_FORMAT_NV12_UBWC;
+				break;
+			}
 
 			ret = hfi_gen1_set_property(inst, ptype, &fmt, sizeof(fmt));
 		} else {
@@ -907,18 +920,20 @@ static int iris_hfi_gen1_set_format_constraints(struct iris_inst *inst, u32 plan
 {
 	const u32 ptype = HFI_PROPERTY_PARAM_UNCOMPRESSED_PLANE_ACTUAL_CONSTRAINTS_INFO;
 	struct hfi_uncompressed_plane_actual_constraints_info pconstraint;
+	u32 pixelformat = inst->fmt_dst->fmt.pix_mp.pixelformat;
+	u32 stride_multiples = pixelformat == V4L2_PIX_FMT_P010 ? 256 : 128;
 
-	if (inst->fmt_dst->fmt.pix_mp.pixelformat == V4L2_PIX_FMT_QC08C)
+	if (pixelformat == V4L2_PIX_FMT_QC08C || pixelformat == V4L2_PIX_FMT_QC10C)
 		return 0;
 
 	pconstraint.buffer_type = HFI_BUFFER_OUTPUT2;
 	pconstraint.num_planes = 2;
-	pconstraint.plane_format[0].stride_multiples = 128;
+	pconstraint.plane_format[0].stride_multiples = stride_multiples;
 	pconstraint.plane_format[0].max_stride = 8192;
 	pconstraint.plane_format[0].min_plane_buffer_height_multiple = 32;
 	pconstraint.plane_format[0].buffer_alignment = 256;
 
-	pconstraint.plane_format[1].stride_multiples = 128;
+	pconstraint.plane_format[1].stride_multiples = stride_multiples;
 	pconstraint.plane_format[1].max_stride = 8192;
 	pconstraint.plane_format[1].min_plane_buffer_height_multiple = 16;
 	pconstraint.plane_format[1].buffer_alignment = 256;
