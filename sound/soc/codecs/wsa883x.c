@@ -1381,6 +1381,7 @@ static int wsa883x_set_sdw_stream(struct snd_soc_dai *dai,
 static int wsa883x_digital_mute(struct snd_soc_dai *dai, int mute, int stream)
 {
 	struct snd_soc_component *component = dai->component;
+	struct wsa883x_priv *wsa883x = snd_soc_component_get_drvdata(component);
 
 	if (mute) {
 		snd_soc_component_write_field(component, WSA883X_DRE_CTL_1,
@@ -1396,6 +1397,19 @@ static int wsa883x_digital_mute(struct snd_soc_dai *dai, int mute, int stream)
 					      WSA883X_GLOBAL_PA_EN_MASK,
 					      WSA883X_GLOBAL_PA_ENABLE);
 
+		/*
+		 * With the compander port in use, hand the PA gain over to DRE
+		 * once the PA is up, as the downstream driver does 3 ms after
+		 * enabling it. The codec's compander boosts quiet signals and
+		 * sends the matching attenuation over that port, which the PA
+		 * only applies in DRE mode; left at the CSR gain, the boost
+		 * reaches the speaker as heavy compression.
+		 */
+		if (wsa883x->port_enable[WSA883X_PORT_COMP]) {
+			usleep_range(3000, 3100);
+			snd_soc_component_write_field(component, WSA883X_DRE_CTL_1,
+						      WSA883X_DRE_GAIN_EN_MASK, 0);
+		}
 	}
 
 	return 0;
