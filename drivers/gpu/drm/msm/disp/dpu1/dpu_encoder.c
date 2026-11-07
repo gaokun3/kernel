@@ -393,10 +393,12 @@ static void _dpu_encoder_setup_dither(struct dpu_hw_pingpong *hw_pp, unsigned bp
 
 	switch (bpc) {
 	case 6:
-		dither_cfg.c0_bitdepth = 6;
-		dither_cfg.c1_bitdepth = 6;
-		dither_cfg.c2_bitdepth = 6;
-		dither_cfg.c3_bitdepth = 6;
+	case 8:
+		/* the pipeline keeps more bits than an 8 bpc panel takes too */
+		dither_cfg.c0_bitdepth = bpc;
+		dither_cfg.c1_bitdepth = bpc;
+		dither_cfg.c2_bitdepth = bpc;
+		dither_cfg.c3_bitdepth = bpc;
 		dither_cfg.temporal_en = 0;
 		break;
 	default:

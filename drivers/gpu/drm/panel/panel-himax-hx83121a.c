@@ -686,6 +686,7 @@ static const struct panel_desc boe_ppc357db1_4_desc = {
 	.width_mm = 266,
 	.height_mm = 166,
 	.lanes = 4,
+	.bpc = 8,
 	.format = MIPI_DSI_FMT_RGB888,
 	.mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_CLOCK_NON_CONTINUOUS |
 		      MIPI_DSI_MODE_LPM,
@@ -705,6 +706,7 @@ static const struct panel_desc csot_ppc357db1_4_desc = {
 	.width_mm = 266,
 	.height_mm = 166,
 	.lanes = 4,
+	.bpc = 8,
 	.format = MIPI_DSI_FMT_RGB888,
 	.mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_CLOCK_NON_CONTINUOUS |
 		      MIPI_DSI_MODE_LPM,
