@@ -226,7 +226,9 @@
 		lens-focus = <&voice_coil_motor>;
 
 		orientation = <1>;
-		rotation = <180>; /* FIXME */
+		/* Counter-clockwise (video-interface-devices.yaml). Confirmed on
+		 * device 2026-09-24: preview upright, SENSOR_ORIENTATION 180. */
+		rotation = <180>;
 
 		port {
 			ov13b10_ep: endpoint {
