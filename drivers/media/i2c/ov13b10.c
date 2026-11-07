@@ -1135,6 +1135,7 @@ ov13b10_set_pad_format(struct v4l2_subdev *sd,
 	struct v4l2_mbus_framefmt *framefmt;
 	s32 vblank_def;
 	s32 vblank_min;
+	s64 exposure_max;
 	s64 h_blank;
 	s64 pixel_rate;
 	s64 link_freq;
@@ -1168,6 +1169,16 @@ ov13b10_set_pad_format(struct v4l2_subdev *sd,
 					 OV13B10_VTS_MAX - mode->height,
 					 1, vblank_def);
 		__v4l2_ctrl_s_ctrl(ov13b->vblank, vblank_def);
+		/*
+		 * The exposure limit follows height + vblank, but s_ctrl only
+		 * runs when vblank changes: keep the limit right for the new
+		 * height when vblank already had this value.
+		 */
+		exposure_max = mode->height + ov13b->vblank->val - 8;
+		__v4l2_ctrl_modify_range(ov13b->exposure,
+					 ov13b->exposure->minimum,
+					 exposure_max, ov13b->exposure->step,
+					 exposure_max);
 		h_blank = mode->ppl - mode->width;
 		__v4l2_ctrl_modify_range(ov13b->hblank, h_blank,
 					 h_blank, 1, h_blank);
