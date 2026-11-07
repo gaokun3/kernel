@@ -19,6 +19,7 @@
 #include <linux/pm_runtime.h>
 #include <linux/pm_domain.h>
 #include <linux/slab.h>
+#include <linux/workqueue.h>
 #include <linux/videodev2.h>
 
 #include <media/media-device.h>
@@ -28,6 +29,17 @@
 #include <media/v4l2-fwnode.h>
 
 #include "camss.h"
+
+/*
+ * v4l2-async only completes the notifier after all graph endpoints bind.
+ * On boards shipped with alternate rear camera modules, an absent sensor in DT
+ * never binds and would otherwise block the working front camera as well.
+ * Wait sensor_wait_ms after probe, then re-register the notifier with only the
+ * bound endpoints (0 disables the fallback).
+ */
+static unsigned int sensor_wait_ms = 20000;
+module_param(sensor_wait_ms, uint, 0644);
+MODULE_PARM_DESC(sensor_wait_ms, "ms to wait for all sensors before continuing with the bound ones (0=off)");
 
 #define CAMSS_CLOCK_MARGIN_NUMERATOR 105
 #define CAMSS_CLOCK_MARGIN_DENOMINATOR 100
@@ -4790,7 +4802,20 @@ static int camss_parse_endpoint_node(struct device *dev,
  *
  * Return 0 on success or a negative error code on failure
  */
-static int camss_parse_ports(struct camss *camss)
+static bool camss_sensor_is_bound(struct camss *camss, struct fwnode_handle *ep)
+{
+	struct fwnode_handle *remote = fwnode_graph_get_remote_endpoint(ep);
+	unsigned int i;
+	bool found = false;
+
+	for (i = 0; i < camss->num_bound_sensors; i++)
+		if (camss->bound_sensors[i] == remote)
+			found = true;
+	fwnode_handle_put(remote);
+	return found;
+}
+
+static int camss_parse_ports_filtered(struct camss *camss, bool bound_only)
 {
 	struct device *dev = camss->dev;
 	struct fwnode_handle *fwnode = dev_fwnode(dev), *ep;
@@ -4798,6 +4823,11 @@ static int camss_parse_ports(struct camss *camss)
 
 	fwnode_graph_for_each_endpoint(fwnode, ep) {
 		struct camss_async_subdev *csd;
+
+		if (bound_only && !camss_sensor_is_bound(camss, ep)) {
+			dev_warn(dev, "skipping endpoint %pfw: its sensor never bound\n", ep);
+			continue;
+		}
 
 		csd = v4l2_async_nf_add_fwnode_remote(&camss->notifier, ep,
 						      typeof(*csd));
@@ -4817,6 +4847,11 @@ err_cleanup:
 	fwnode_handle_put(ep);
 
 	return ret;
+}
+
+static int camss_parse_ports(struct camss *camss)
+{
+	return camss_parse_ports_filtered(camss, false);
 }
 
 /*
@@ -5177,6 +5212,19 @@ static int camss_subdev_notifier_bound(struct v4l2_async_notifier *async,
 	csiphy->cfg.csi2 = &csd->interface.csi2;
 	subdev->host_priv = csiphy;
 
+	/* Record bound sensor fwnodes so the fallback notifier can filter by them */
+	if (asd->match.fwnode &&
+	    camss->num_bound_sensors < ARRAY_SIZE(camss->bound_sensors)) {
+		unsigned int i;
+
+		for (i = 0; i < camss->num_bound_sensors; i++)
+			if (camss->bound_sensors[i] == asd->match.fwnode)
+				break;
+		if (i == camss->num_bound_sensors)
+			camss->bound_sensors[camss->num_bound_sensors++] =
+				fwnode_handle_get(asd->match.fwnode);
+	}
+
 	return 0;
 }
 
@@ -5185,6 +5233,8 @@ static int camss_subdev_notifier_complete(struct v4l2_async_notifier *async)
 	struct camss *camss = container_of(async, struct camss, notifier);
 	struct v4l2_device *v4l2_dev = &camss->v4l2_dev;
 	struct v4l2_subdev *sd;
+
+	camss->notifier_complete = true;
 
 	list_for_each_entry(sd, &v4l2_dev->subdevs, list) {
 		struct csiphy_device *csiphy = sd->host_priv;
@@ -5224,6 +5274,39 @@ static const struct v4l2_async_notifier_operations camss_subdev_notifier_ops = {
 	.bound = camss_subdev_notifier_bound,
 	.complete = camss_subdev_notifier_complete,
 };
+
+static void camss_sensor_fallback_work(struct work_struct *work)
+{
+	struct camss *camss = container_of(to_delayed_work(work), struct camss,
+					   sensor_fallback_work);
+	struct v4l2_async_connection *asd;
+	int ret;
+
+	if (camss->notifier_complete)
+		return;
+
+	dev_warn(camss->dev, "not all sensors bound after %u ms; continuing with %u bound sensor(s)\n",
+		 sensor_wait_ms, camss->num_bound_sensors);
+	list_for_each_entry(asd, &camss->notifier.waiting_list, asc_entry)
+		dev_warn(camss->dev, "  never bound: %pfw\n", asd->match.fwnode);
+
+	if (!camss->num_bound_sensors)
+		return;
+
+	v4l2_async_nf_unregister(&camss->notifier);
+	v4l2_async_nf_cleanup(&camss->notifier);
+	v4l2_async_nf_init(&camss->notifier, &camss->v4l2_dev);
+	camss->notifier.ops = &camss_subdev_notifier_ops;
+
+	ret = camss_parse_ports_filtered(camss, true);
+	if (ret < 0) {
+		dev_err(camss->dev, "fallback: parsing bound endpoints failed: %d\n", ret);
+		return;
+	}
+	ret = v4l2_async_nf_register(&camss->notifier);
+	if (ret)
+		dev_err(camss->dev, "fallback: re-registering notifier failed: %d\n", ret);
+}
 
 static const struct media_device_ops camss_media_ops = {
 	.link_notify = v4l2_pipeline_link_notify,
@@ -5431,6 +5514,7 @@ static int camss_probe(struct platform_device *pdev)
 	}
 
 	v4l2_async_nf_init(&camss->notifier, &camss->v4l2_dev);
+	INIT_DELAYED_WORK(&camss->sensor_fallback_work, camss_sensor_fallback_work);
 
 	pm_runtime_enable(dev);
 
@@ -5459,6 +5543,10 @@ static int camss_probe(struct platform_device *pdev)
 			"Failed to register async subdev nodes: %d\n", ret);
 		goto err_media_device_unregister;
 	}
+
+	if (sensor_wait_ms && !camss->notifier_complete)
+		schedule_delayed_work(&camss->sensor_fallback_work,
+				      msecs_to_jiffies(sensor_wait_ms));
 
 	return 0;
 
@@ -5496,7 +5584,11 @@ void camss_delete(struct camss *camss)
 static void camss_remove(struct platform_device *pdev)
 {
 	struct camss *camss = platform_get_drvdata(pdev);
+	unsigned int i;
 
+	cancel_delayed_work_sync(&camss->sensor_fallback_work);
+	for (i = 0; i < camss->num_bound_sensors; i++)
+		fwnode_handle_put(camss->bound_sensors[i]);
 	v4l2_async_nf_unregister(&camss->notifier);
 	v4l2_async_nf_cleanup(&camss->notifier);
 	camss_unregister_entities(camss);

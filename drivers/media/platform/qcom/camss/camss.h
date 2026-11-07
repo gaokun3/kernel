@@ -124,6 +124,11 @@ struct camss_resources {
 struct camss {
 	struct v4l2_device v4l2_dev;
 	struct v4l2_async_notifier notifier;
+	/* Fallback state for completing the notifier without unbound sensors */
+	struct delayed_work sensor_fallback_work;
+	bool notifier_complete;
+	struct fwnode_handle *bound_sensors[8];
+	unsigned int num_bound_sensors;
 	struct media_device media_dev;
 	struct device *dev;
 	struct csiphy_device *csiphy;
