@@ -225,6 +225,16 @@
 
 		lens-focus = <&voice_coil_motor>;
 
+		/*
+		 * Same indicator as the front camera (GPIO34, white:indicator).
+		 * The removed s5k3l6 rear node carried it too; v4l2 lights it on
+		 * s_stream (v4l2-subdev.c call_s_stream), so either sensor
+		 * streaming turns it on. Not async: led_get() is not a v4l2
+		 * subdev, unlike flash-leds.
+		 */
+		leds = <&privacy_led>;
+		led-names = "privacy";
+
 		orientation = <1>;
 		/* Counter-clockwise (video-interface-devices.yaml). Confirmed on
 		 * device 2026-09-24: preview upright, SENSOR_ORIENTATION 180. */
