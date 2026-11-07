@@ -1900,6 +1900,7 @@ static int hi846_set_format(struct v4l2_subdev *sd,
 	const struct hi846_datafmt *fmt = hi846_find_datafmt(mf->code);
 	u32 tgt_fps;
 	s32 vblank_def, h_blank;
+	s64 exposure_max;
 
 	if (!fmt) {
 		mf->code = hi846_colour_fmts[0].code;
@@ -1960,6 +1961,16 @@ static int hi846_set_format(struct v4l2_subdev *sd,
 				 HI846_FLL_MAX - hi846->cur_mode->height, 1,
 				 vblank_def);
 	__v4l2_ctrl_s_ctrl(hi846->vblank, vblank_def);
+	/*
+	 * The exposure limit follows height + vblank, but s_ctrl only runs when
+	 * vblank changes: keep the limit right for the new height when vblank
+	 * already had this value.
+	 */
+	exposure_max = hi846->cur_mode->height + hi846->vblank->val -
+		       HI846_EXPOSURE_MAX_MARGIN;
+	__v4l2_ctrl_modify_range(hi846->exposure, hi846->exposure->minimum,
+				 exposure_max, hi846->exposure->step,
+				 exposure_max);
 
 	h_blank = hi846->cur_mode->llp - hi846->cur_mode->width;
 
