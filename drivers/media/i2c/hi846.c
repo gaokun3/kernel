@@ -1560,7 +1560,8 @@ static int hi846_set_ctrl(struct v4l2_ctrl *ctrl)
 
 	case V4L2_CID_EXPOSURE:
 		shutter = ctrl->val;
-		frame_len = hi846->cur_mode->frame_len;
+		/* The frame length set through V4L2_CID_VBLANK, not the mode's default */
+		frame_len = hi846->cur_mode->height + hi846->vblank->val;
 
 		if (shutter > frame_len - 6) { /* margin */
 			frame_len = shutter + 6;
