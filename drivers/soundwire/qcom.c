@@ -1259,7 +1259,8 @@ static int qcom_swrm_stream_alloc_ports(struct qcom_swrm_ctrl *ctrl,
 			continue;
 
 		port_mask = &ctrl->port_mask;
-		maxport = ctrl->nports;
+		/* Ports are numbered 1 to nports, bit 0 of port_mask is reserved */
+		maxport = ctrl->nports + 1;
 
 		list_for_each_entry(s_rt, &m_rt->slave_rt_list, m_rt_node) {
 			slave = s_rt->slave;
