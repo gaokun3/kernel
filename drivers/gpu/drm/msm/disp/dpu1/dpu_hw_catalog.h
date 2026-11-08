@@ -78,10 +78,12 @@ enum {
  * DSPP sub-blocks
  * @DPU_DSPP_PCC             Panel color correction block
  * @DPU_DSPP_GC              Gamma correction block
+ * @DPU_DSPP_GAMUT           3D LUT gamut mapping block
  */
 enum {
 	DPU_DSPP_PCC = 0x1,
 	DPU_DSPP_GC,
+	DPU_DSPP_GAMUT,
 	DPU_DSPP_MAX
 };
 
@@ -331,10 +333,12 @@ struct dpu_lm_sub_blks {
  * struct dpu_dspp_sub_blks: Information of DSPP block
  * @pcc: pixel color correction block
  * @gc: gamma correction block
+ * @gamut: 3D LUT gamut mapping block
  */
 struct dpu_dspp_sub_blks {
 	struct dpu_pp_blk pcc;
 	struct dpu_pp_blk gc;
+	struct dpu_pp_blk gamut;
 };
 
 struct dpu_pingpong_sub_blks {

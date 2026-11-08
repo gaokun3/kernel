@@ -52,6 +52,19 @@ struct dpu_hw_gc_lut {
 	__u32 c2[PGC_TBL_LEN];
 };
 
+#define DPU_GAMUT_GRID		13
+#define DPU_GAMUT_NODES		(DPU_GAMUT_GRID * DPU_GAMUT_GRID * DPU_GAMUT_GRID)
+#define DPU_GAMUT_BANKS		2
+
+/**
+ * struct dpu_hw_gamut_lut - 13x13x13 3D LUT
+ * @node: 12-bit R, G, B output of the node at (b * 13 + g) * 13 + r, where
+ *        node i of an axis sits at input i / 12 of full scale
+ */
+struct dpu_hw_gamut_lut {
+	u16 node[DPU_GAMUT_NODES][3];
+};
+
 /**
  * struct dpu_hw_dspp_ops - interface to the dspp hardware driver functions
  * Caller must call the init function to get the dspp context for each dspp
@@ -71,6 +84,22 @@ struct dpu_hw_dspp_ops {
 	 * @gc_lut: Pointer to lut content
 	 */
 	void (*setup_gc)(struct dpu_hw_dspp *ctx, struct dpu_hw_gc_lut *gc_lut);
+
+	/**
+	 * load_gamut - write a 3D LUT into one bank, leaving the active one alone
+	 * @ctx: Pointer to dspp context
+	 * @bank: 0 or 1
+	 * @lut: Pointer to the LUT
+	 */
+	void (*load_gamut)(struct dpu_hw_dspp *ctx, int bank,
+			   const struct dpu_hw_gamut_lut *lut);
+
+	/**
+	 * select_gamut - apply a loaded bank, or disable the 3D LUT
+	 * @ctx: Pointer to dspp context
+	 * @bank: 0 or 1, or -1 to disable
+	 */
+	void (*select_gamut)(struct dpu_hw_dspp *ctx, int bank);
 
 };
 
