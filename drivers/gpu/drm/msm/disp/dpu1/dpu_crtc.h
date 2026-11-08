@@ -176,8 +176,8 @@ struct dpu_crtc {
 	struct list_head frame_event_list;
 	spinlock_t spin_lock;
 
-	/* factory panel calibration PCC currently includes, if any */
-	const s32 *pcc_cal;
+	/* 3D LUT bank of the panel calibration in use, -1 for none */
+	int gamut_bank;
 	struct completion frame_done_comp;
 
 	/* for handling internal event thread */

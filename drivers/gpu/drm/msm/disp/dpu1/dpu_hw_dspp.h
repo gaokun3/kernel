@@ -121,6 +121,9 @@ struct dpu_hw_dspp {
 
 	/* Ops */
 	struct dpu_hw_dspp_ops ops;
+
+	/* both 3D LUT banks hold the panel calibration */
+	bool gamut_loaded;
 };
 
 /**

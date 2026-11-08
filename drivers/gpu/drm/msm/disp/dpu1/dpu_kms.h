@@ -83,7 +83,7 @@ struct dpu_kms {
 	struct dpu_rm rm;
 
 	/* factory calibration of the built-in panel, see dpu_panel_cal.c */
-	s32 panel_cal[DPU_PANEL_CAL_GAMUTS][DPU_PANEL_CAL_LEN];
+	struct dpu_hw_gamut_lut *panel_lut;
 	bool has_panel_cal;
 	/* picks the gamut, stays valid while the display is off */
 	struct drm_connector *panel_connector;

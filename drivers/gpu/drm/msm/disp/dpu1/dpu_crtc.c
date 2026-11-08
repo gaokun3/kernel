@@ -792,7 +792,13 @@ static int _dpu_crtc_check_and_setup_lm_bounds(struct drm_crtc *crtc,
 	return 0;
 }
 
-static const s32 *_dpu_crtc_panel_cal(struct drm_crtc_state *state)
+/*
+ * The 3D LUT bank of the factory calibration for this commit: sRGB for the
+ * BT709_YCC colorspace, Display P3 for DCI-P3_RGB_D65 and for the default
+ * colorspace, which shows content as P3 over the panel's near-P3 gamut.
+ * -1 when the panel has no usable calibration or it is turned off.
+ */
+static int _dpu_crtc_panel_bank(struct drm_crtc_state *state)
 {
 	struct drm_crtc *crtc = state->crtc;
 	struct dpu_kms *dpu_kms = _dpu_crtc_get_kms(crtc);
@@ -800,18 +806,18 @@ static const s32 *_dpu_crtc_panel_cal(struct drm_crtc_state *state)
 	struct drm_encoder *encoder;
 
 	if (!dpu_kms->has_panel_cal || !READ_ONCE(panel_calibration))
-		return NULL;
+		return -1;
 
 	drm_for_each_encoder_mask(encoder, crtc->dev, state->encoder_mask) {
 		if (encoder->encoder_type != DRM_MODE_ENCODER_DSI)
 			continue;
 		if (connector &&
-		    connector->state->colorspace == DRM_MODE_COLORIMETRY_DCI_P3_RGB_D65)
-			return dpu_kms->panel_cal[DPU_PANEL_CAL_P3];
-		return dpu_kms->panel_cal[DPU_PANEL_CAL_SRGB];
+		    connector->state->colorspace == DRM_MODE_COLORIMETRY_BT709_YCC)
+			return DPU_PANEL_CAL_SRGB;
+		return DPU_PANEL_CAL_P3;
 	}
 
-	return NULL;
+	return -1;
 }
 
 static u32 _dpu_crtc_pcc_s3_15(s64 val)
@@ -819,27 +825,8 @@ static u32 _dpu_crtc_pcc_s3_15(s64 val)
 	return clamp_t(s64, val, -BIT(17), BIT(17) - 1) & GENMASK(17, 0);
 }
 
-/* The calibration corrects the panel, so it comes after the CTM */
-static void _dpu_crtc_apply_panel_cal(const s32 *cal, s64 *m)
-{
-	s64 out[DPU_PANEL_CAL_LEN];
-	int i, r, c;
-
-	for (r = 0; r < 3; r++) {
-		for (c = 0; c < 3; c++) {
-			s64 sum = 0;
-
-			for (i = 0; i < 3; i++)
-				sum += cal[r * 3 + i] * m[i * 3 + c];
-			out[r * 3 + c] = sum >> 15;
-		}
-	}
-
-	memcpy(m, out, sizeof(out));
-}
-
 static void _dpu_crtc_get_pcc_coeff(struct drm_crtc_state *state,
-		const s32 *cal, struct dpu_hw_pcc_cfg *cfg)
+		struct dpu_hw_pcc_cfg *cfg)
 {
 	struct drm_color_ctm *ctm;
 	s64 m[9];
@@ -854,9 +841,6 @@ static void _dpu_crtc_get_pcc_coeff(struct drm_crtc_state *state,
 
 	for (i = 0; i < ARRAY_SIZE(m); i++)
 		m[i] = (s64)drm_color_ctm_s31_32_to_qm_n(ctm->matrix[i], 3, 15);
-
-	if (cal)
-		_dpu_crtc_apply_panel_cal(cal, m);
 
 	cfg->r.r = _dpu_crtc_pcc_s3_15(m[0]);
 	cfg->r.g = _dpu_crtc_pcc_s3_15(m[1]);
@@ -906,19 +890,19 @@ static void _dpu_crtc_setup_cp_blocks(struct drm_crtc *crtc)
 	struct dpu_crtc_state *cstate = to_dpu_crtc_state(crtc->state);
 	struct dpu_crtc_mixer *mixer = cstate->mixers;
 	struct dpu_crtc *dpu_crtc = to_dpu_crtc(crtc);
-	const s32 *cal = _dpu_crtc_panel_cal(state);
+	struct dpu_kms *dpu_kms = _dpu_crtc_get_kms(crtc);
+	bool modeset = drm_atomic_crtc_needs_modeset(state);
+	int bank = _dpu_crtc_panel_bank(state);
 	struct dpu_hw_pcc_cfg cfg;
 	struct dpu_hw_gc_lut *gc_lut;
 	struct dpu_hw_ctl *ctl;
 	struct dpu_hw_dspp *dspp;
 	int i;
 
-
-	if (!state->color_mgmt_changed && !drm_atomic_crtc_needs_modeset(state) &&
-	    cal == dpu_crtc->pcc_cal)
+	/* DSPPs change only along with color_mgmt_changed or a modeset */
+	if (!state->color_mgmt_changed && !modeset &&
+	    bank == dpu_crtc->gamut_bank)
 		return;
-
-	dpu_crtc->pcc_cal = cal;
 
 	for (i = 0; i < cstate->num_mixers; i++) {
 		ctl = mixer[i].lm_ctl;
@@ -927,11 +911,31 @@ static void _dpu_crtc_setup_cp_blocks(struct drm_crtc *crtc)
 		if (!dspp)
 			continue;
 
+		/*
+		 * Both banks stay loaded, so switching gamut is one opmode write.
+		 * A modeset may bring DSPPs that lost power; one that turns the
+		 * CRTC off gets the LUTs at the next enable instead.
+		 */
+		if (dspp->ops.select_gamut && state->active) {
+			if (modeset)
+				dspp->gamut_loaded = false;
+			if (bank >= 0 && !dspp->gamut_loaded) {
+				dspp->ops.load_gamut(dspp, DPU_PANEL_CAL_SRGB,
+					&dpu_kms->panel_lut[DPU_PANEL_CAL_SRGB]);
+				dspp->ops.load_gamut(dspp, DPU_PANEL_CAL_P3,
+					&dpu_kms->panel_lut[DPU_PANEL_CAL_P3]);
+				dspp->gamut_loaded = true;
+			}
+			dspp->ops.select_gamut(dspp, bank);
+			ctl->ops.update_pending_flush_dspp(ctl,
+				mixer[i].hw_dspp->idx, DPU_DSPP_GAMUT);
+		}
+
 		if (dspp->ops.setup_pcc) {
 			if (!state->ctm) {
 				dspp->ops.setup_pcc(dspp, NULL);
 			} else {
-				_dpu_crtc_get_pcc_coeff(state, cal, &cfg);
+				_dpu_crtc_get_pcc_coeff(state, &cfg);
 				dspp->ops.setup_pcc(dspp, &cfg);
 			}
 
@@ -957,6 +961,8 @@ static void _dpu_crtc_setup_cp_blocks(struct drm_crtc *crtc)
 				mixer[i].hw_dspp->idx, DPU_DSPP_GC);
 		}
 	}
+
+	dpu_crtc->gamut_bank = bank;
 }
 
 static void dpu_crtc_atomic_begin(struct drm_crtc *crtc,
@@ -1962,6 +1968,7 @@ struct drm_crtc *dpu_crtc_init(struct drm_device *dev, struct drm_plane *plane,
 
 	spin_lock_init(&dpu_crtc->spin_lock);
 	atomic_set(&dpu_crtc->frame_pending, 0);
+	dpu_crtc->gamut_bank = -1;
 
 	init_completion(&dpu_crtc->frame_done_comp);
 

@@ -31,6 +31,7 @@
 #include "dpu_crtc.h"
 #include "dpu_encoder.h"
 #include "dpu_formats.h"
+#include "dpu_hw_dspp.h"
 #include "dpu_hw_vbif.h"
 #include "dpu_kms.h"
 #include "dpu_plane.h"
@@ -1290,7 +1291,11 @@ static int dpu_kms_hw_init(struct msm_kms *kms)
 	/* Disable vblank irqs aggressively for power-saving */
 	dev->vblank_disable_immediate = true;
 
-	rc = dpu_panel_cal_load(dpu_kms->panel_cal);
+	dpu_kms->panel_lut = devm_kcalloc(&dpu_kms->pdev->dev,
+					  DPU_PANEL_CAL_GAMUTS,
+					  sizeof(*dpu_kms->panel_lut), GFP_KERNEL);
+	rc = dpu_kms->panel_lut ? dpu_panel_cal_load(dpu_kms->panel_lut) :
+				  -ENOMEM;
 	dpu_kms->has_panel_cal = !rc;
 	if (rc && rc != -ENODEV)
 		DPU_ERROR("factory panel calibration unusable: %d\n", rc);
