@@ -28,6 +28,13 @@
 #define CAPTURE_MAX_NUM_PERIODS		8
 #define CAPTURE_MAX_PERIOD_SIZE		65536
 #define CAPTURE_MIN_PERIOD_SIZE		6144
+/*
+ * Period and buffer sizes are multiples of this many frames. The SC8280XP
+ * ADSP plays 5 ms periods without gaps when user space keeps three or more
+ * of them queued; capture keeps the original 10 ms step.
+ */
+#define PLAYBACK_PERIOD_STEP		240
+#define CAPTURE_PERIOD_STEP		480
 #define BUFFER_BYTES_MAX (PLAYBACK_MAX_NUM_PERIODS * PLAYBACK_MAX_PERIOD_SIZE)
 #define BUFFER_BYTES_MIN (PLAYBACK_MIN_NUM_PERIODS * PLAYBACK_MIN_PERIOD_SIZE)
 #define COMPR_PLAYBACK_MAX_FRAGMENT_SIZE (128 * 1024)
@@ -387,6 +394,7 @@ static int q6apm_dai_open(struct snd_soc_component *component,
 	struct q6apm_dai_data *pdata;
 	struct q6apm_dai_rtd *prtd;
 	int graph_id, ret;
+	unsigned int step;
 
 	graph_id = cpu_dai->driver->id;
 
@@ -430,14 +438,16 @@ static int q6apm_dai_open(struct snd_soc_component *component,
 		}
 	}
 
-	/* setup 10ms latency to accommodate DSP restrictions */
-	ret = snd_pcm_hw_constraint_step(runtime, 0, SNDRV_PCM_HW_PARAM_PERIOD_SIZE, 480);
+	/* period step to accommodate DSP restrictions */
+	step = substream->stream == SNDRV_PCM_STREAM_PLAYBACK ?
+	       PLAYBACK_PERIOD_STEP : CAPTURE_PERIOD_STEP;
+	ret = snd_pcm_hw_constraint_step(runtime, 0, SNDRV_PCM_HW_PARAM_PERIOD_SIZE, step);
 	if (ret < 0) {
 		dev_err(dev, "constraint for period bytes step ret = %d\n", ret);
 		goto err;
 	}
 
-	ret = snd_pcm_hw_constraint_step(runtime, 0, SNDRV_PCM_HW_PARAM_BUFFER_SIZE, 480);
+	ret = snd_pcm_hw_constraint_step(runtime, 0, SNDRV_PCM_HW_PARAM_BUFFER_SIZE, step);
 	if (ret < 0) {
 		dev_err(dev, "constraint for buffer bytes step ret = %d\n", ret);
 		goto err;
