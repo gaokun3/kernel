@@ -765,6 +765,20 @@ static int csid_set_power(struct v4l2_subdev *sd, int on)
  * The VFE line it feeds marks the buffer of that frame. Interrupt context;
  * the links do not change while streaming.
  */
+/*
+ * csid_port_running - Whether the VFE line a source port feeds takes frames.
+ * Interrupt context; the links do not change while streaming.
+ */
+bool csid_port_running(struct csid_device *csid, u8 port)
+{
+	struct media_pad *pad;
+
+	pad = media_pad_remote_pad_first(&csid->pads[MSM_CSID_PAD_FIRST_SRC + port]);
+	if (!pad || !is_media_entity_v4l2_subdev(pad->entity))
+		return false;
+	return vfe_line_running(v4l2_get_subdevdata(media_entity_to_v4l2_subdev(pad->entity)));
+}
+
 void csid_frame_error(struct csid_device *csid, u8 port)
 {
 	struct media_pad *pad;

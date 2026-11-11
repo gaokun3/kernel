@@ -468,6 +468,9 @@ int vfe17x_disp_register(struct vfe_device *vfe, struct v4l2_device *v4l2_dev)
 	ret = msm_video_register(video, v4l2_dev, name);
 	if (ret < 0)
 		goto err_subdev;
+	/* Its buffers take the time of the frame start, like the pixel path's */
+	video->vb2_q.timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC |
+				       V4L2_BUF_FLAG_TSTAMP_SRC_SOE;
 
 	ret = media_create_pad_link(&sd->entity, MSM_VFE_PAD_SRC, &video->vdev.entity, 0,
 				    MEDIA_LNK_FL_IMMUTABLE | MEDIA_LNK_FL_ENABLED);

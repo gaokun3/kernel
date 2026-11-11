@@ -1483,6 +1483,23 @@ bool vfe17x_meta_running(struct vfe_device *vfe)
 }
 
 /* Time between the last two epochs 0 of the pixel path, 0 if unknown */
+/* The pixel path is wedged until the next start (vfe17x_meta_fatal()) */
+bool vfe17x_meta_wedged(struct vfe_device *vfe)
+{
+	struct vfe_pix_meta *meta = vfe->pix_meta;
+	unsigned long flags;
+	bool wedged;
+
+	if (!meta)
+		return false;
+
+	spin_lock_irqsave(&meta->lock, flags);
+	wedged = meta->wedged;
+	spin_unlock_irqrestore(&meta->lock, flags);
+
+	return wedged;
+}
+
 u64 vfe17x_meta_period_ns(struct vfe_device *vfe)
 {
 	struct vfe_pix_meta *meta = vfe->pix_meta;
@@ -1733,11 +1750,11 @@ bool vfe17x_meta_before_first_frame(struct vfe_device *vfe)
  * Number a completed image of the pixel path, or of an RDI line of the same
  * VFE while the pixel path runs, by the epochs like the statistics, so images,
  * statistics and parameters keep the same frame numbers when the driver runs
- * out of image buffers. Stamp it with the start of its frame (epoch 0, line
- * CAMIF_EPOCH0_LINE) rather than its completion: the outputs of a frame end at
- * different times (the display output ends early on a window that leaves out
- * the bottom of the frame), and every buffer of a frame should carry the same
- * time.
+ * out of image buffers. @timestamp: the start of the frame (epoch 0, line
+ * CAMIF_EPOCH0_LINE), for the pixel path's buffers rather than their
+ * completion: its outputs of a frame end at different times (the display
+ * output ends early on a window that leaves out the bottom of the frame), and
+ * all should carry the same time.
  */
 void vfe17x_meta_frame(struct vfe_device *vfe, u32 *sequence, u64 *timestamp)
 {
@@ -2491,7 +2508,9 @@ static int ife_register_node(struct vfe_pix_meta *meta, struct v4l2_device *v4l2
 	q->ops = output ? &ife_params_vb2_ops : &ife_stats_vb2_ops;
 	q->buf_struct_size = output ? sizeof(struct ife_params_buf) :
 				      sizeof(struct ife_stats_buf);
-	q->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
+	/* Statistics take the time of their frame's start, like the images */
+	q->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC |
+			     (output ? 0 : V4L2_BUF_FLAG_TSTAMP_SRC_SOE);
 	q->lock = lock;
 	q->dev = vfe->camss->dev;
 	ret = vb2_queue_init(q);

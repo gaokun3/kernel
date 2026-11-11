@@ -1295,6 +1295,24 @@ void vfe_line_fatal_error(struct vfe_line *line)
 }
 
 /*
+ * vfe_line_running - Whether a line takes frames: streaming, and for the pixel
+ * path not stopping. Interrupt context, by the CSID feeding it.
+ */
+bool vfe_line_running(struct vfe_line *line)
+{
+	struct vfe_device *vfe = to_vfe(line);
+	unsigned long flags;
+	bool running;
+
+	spin_lock_irqsave(&vfe->output_lock, flags);
+	running = line->output.state == VFE_OUTPUT_ON &&
+		  !(line->id == VFE_LINE_PIX && vfe->pix_stopping);
+	spin_unlock_irqrestore(&vfe->output_lock, flags);
+
+	return running;
+}
+
+/*
  * vfe_line_frame_error - The frame a line is writing came in corrupt
  * @line: VFE line
  *

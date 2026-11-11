@@ -263,6 +263,7 @@ struct camss_buffer *vfe_buf_get_pending(struct vfe_output *output);
 
 int vfe_flush_buffers(struct camss_video *vid, enum vb2_buffer_state state);
 
+bool vfe_line_running(struct vfe_line *line);
 void vfe_line_frame_error(struct vfe_line *line);
 void vfe_line_fatal_error(struct vfe_line *line);
 

@@ -1941,7 +1941,9 @@ static void vfe_disp_drain(struct vfe_pix_disp *disp)
 	if (!stopping)
 		return;
 
-	idle = wait_event_timeout(disp->drain_wq, vfe_disp_idle(disp), msecs_to_jiffies(ms));
+	/* A wedged pixel path writes no more frames: nothing to wait for */
+	idle = vfe17x_meta_wedged(vfe) ||
+	       wait_event_timeout(disp->drain_wq, vfe_disp_idle(disp), msecs_to_jiffies(ms));
 
 	spin_lock_irqsave(&vfe->output_lock, flags);
 	if (disp->output.state == VFE_OUTPUT_STOPPING) {
@@ -2903,9 +2905,18 @@ static void vfe_isr_wm_done(struct vfe_device *vfe, u8 wm)
 	/*
 	 * While the pixel path runs, the RDI lines of the same VFE number
 	 * their frames by its epochs too, so that RAW and processed buffers of
-	 * one sensor frame carry the same sequence and timestamp.
+	 * one sensor frame carry the same sequence. The pixel path's buffers
+	 * take the frame's start time; an RDI line's keep their completion
+	 * time, which its queue's timestamp flags describe whether or not
+	 * the pixel path runs.
 	 */
-	vfe17x_meta_frame(vfe, &ready_buf->vb.sequence, &ready_buf->vb.vb2_buf.timestamp);
+	{
+		u64 frame_ts = ts;
+
+		vfe17x_meta_frame(vfe, &ready_buf->vb.sequence, &frame_ts);
+		if (line->id == VFE_LINE_PIX)
+			ready_buf->vb.vb2_buf.timestamp = frame_ts;
+	}
 	bad = output->error;
 	output->error = false;
 
@@ -3099,6 +3110,10 @@ static int vfe17x_disable(struct vfe_line *line)
 static int vfe17x_pix_register(struct vfe_device *vfe, struct v4l2_device *v4l2_dev)
 {
 	int ret, err;
+
+	/* Its buffers take the time of the frame start (vfe17x_meta_frame()) */
+	vfe->line[VFE_LINE_PIX].video_out.vb2_q.timestamp_flags =
+		V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC | V4L2_BUF_FLAG_TSTAMP_SRC_SOE;
 
 	ret = vfe17x_meta_register(vfe, v4l2_dev);
 	err = vfe17x_disp_register(vfe, v4l2_dev);

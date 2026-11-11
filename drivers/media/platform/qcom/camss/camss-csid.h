@@ -264,6 +264,7 @@ u32 csid_hw_version(struct csid_device *csid);
 u32 csid_src_pad_code(struct csid_device *csid, u32 sink_code,
 		      unsigned int match_format_idx, u32 match_code);
 
+bool csid_port_running(struct csid_device *csid, u8 port);
 void csid_frame_error(struct csid_device *csid, u8 port);
 void csid_fatal_error(struct csid_device *csid, u8 port);
 

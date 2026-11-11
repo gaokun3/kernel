@@ -528,8 +528,23 @@ static int csid_configure_testgen_pattern(struct csid_device *csid, s32 val)
 static void csid_isr_error(struct csid_device *csid, u32 rx, u32 ports)
 {
 	u64 now = ktime_get_ns();
-	bool fatal;
+	bool fatal, running = false;
 	u8 i;
+
+	/*
+	 * A stream stops from the VFE up: between the VFE's stop and the
+	 * CSID's, the frames the sensor still sends have nowhere to go and
+	 * overflow the path FIFOs, then the receiver. No VFE line takes them.
+	 */
+	for (i = 0; i < MSM_CSID_MAX_SRC_STREAMS; i++)
+		if ((csid->phy.en_vc & BIT(i)) && csid_port_running(csid, i))
+			running = true;
+	if (!running) {
+		dev_dbg(csid->camss->dev,
+			"CSID%d: error irq rx %08x, path fifo overflow on ports %x, with the VFE stopped\n",
+			csid->id, rx, ports);
+		return;
+	}
 
 	csid->errors.count++;
 	dev_err_ratelimited(csid->camss->dev,

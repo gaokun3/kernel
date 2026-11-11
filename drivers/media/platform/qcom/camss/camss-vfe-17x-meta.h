@@ -25,6 +25,7 @@ bool vfe17x_meta_epoch(struct vfe_device *vfe, bool next_written, u64 now);
 bool vfe17x_meta_running(struct vfe_device *vfe);
 bool vfe17x_meta_running_locked(struct vfe_device *vfe);
 u64 vfe17x_meta_period_ns(struct vfe_device *vfe);
+bool vfe17x_meta_wedged(struct vfe_device *vfe);
 void vfe17x_meta_lock(struct vfe_device *vfe);
 void vfe17x_meta_unlock(struct vfe_device *vfe);
 bool vfe17x_meta_join_open_locked(struct vfe_device *vfe);
