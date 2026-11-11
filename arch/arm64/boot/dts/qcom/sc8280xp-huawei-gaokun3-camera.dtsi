@@ -142,6 +142,10 @@
 
 	vdda-phy-supply = <&vreg_l6b>;
 	vdda-pll-supply = <&vreg_l3b>;
+	vdd-csiphy01-0p88-supply = <&vreg_l6d>;
+	vdd-csiphy01-1p2-supply = <&vreg_l4d>;
+	vdd-csiphy23-0p88-supply = <&vreg_l6b>;
+	vdd-csiphy23-1p2-supply = <&vreg_l3b>;
 
 	status = "okay";
 
