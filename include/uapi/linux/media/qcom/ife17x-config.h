@@ -31,6 +31,7 @@
  * @IFE17X_PARAMS_BLOCK_AWB_BG: AWB Bayer grid statistics (AWBBGStats14)
  * @IFE17X_PARAMS_BLOCK_PDPC: phase detection pixel correction (PDPC11)
  * @IFE17X_PARAMS_BLOCK_BF: focus statistics (BFStats23)
+ * @IFE17X_PARAMS_BLOCK_ABF: adaptive Bayer filter (ABF34)
  */
 enum ife17x_params_block_type {
 	IFE17X_PARAMS_BLOCK_BLS,
@@ -40,6 +41,7 @@ enum ife17x_params_block_type {
 	IFE17X_PARAMS_BLOCK_AWB_BG,
 	IFE17X_PARAMS_BLOCK_PDPC,
 	IFE17X_PARAMS_BLOCK_BF,
+	IFE17X_PARAMS_BLOCK_ABF,
 };
 
 /**
@@ -280,6 +282,84 @@ struct ife17x_params_bf {
 	struct ife17x_bf_roi rois[IFE17X_BF_MAX_ROIS];
 } __attribute__((aligned(8)));
 
+#define IFE17X_ABF_NOISE_NODES		65
+
+#define IFE17X_ABF_FL_FILTER		(1U << 0)
+#define IFE17X_ABF_FL_RADIAL		(1U << 1)
+#define IFE17X_ABF_FL_BPC		(1U << 2)
+
+/**
+ * struct ife17x_params_abf - adaptive Bayer filter
+ * @header: block header, type IFE17X_PARAMS_BLOCK_ABF
+ * @noise: inverse noise levels, 65 nodes evenly spaced over the input range,
+ *	   0..511, none above the one before it. CamX sets 8192 / (noise
+ *	   standard deviation * edge softness), limited to 511.
+ * @flags: IFE17X_ABF_FL_FILTER turns the filter on, IFE17X_ABF_FL_RADIAL the
+ *	   adjustment by the distance from the optical centre,
+ *	   IFE17X_ABF_FL_BPC the single bad pixel correction
+ * @pixel_match: 0..4 each
+ * @distance_ker: two sets of kernel weights, 1..4, 0..2 and 0..1
+ * @curve_offset: per Bayer channel, 0..64
+ * @bpc_fmax: 0..63
+ * @bpc_fmin: 0..63
+ * @bpc_max_shift: 0..14
+ * @bpc_min_shift: 0..14
+ * @bpc_offset: 0..4095
+ * @black_level: black level still in the data, 14 bit pipeline units like
+ *		 struct ife17x_params_bls, 0..4095
+ * @noise_prsv_anchor: start of the noise preservation ramp, 0..1023
+ * @noise_prsv_gap: length of the ramp, 0..1023
+ * @noise_prsv_lo: noise preserved before the ramp, in 1/256, 0..256, for
+ *		   two channels
+ * @noise_prsv_slope: slope of the ramp, -256..256
+ * @noise_prsv_shift: right shift of the slope, 0..10
+ * @radial_anchor: squared distances where the four radial segments start,
+ *		   0..4095, ascending
+ * @radial_gain: two radial curves: value at the start of each segment, 0..255
+ * @radial_slope: slope of each segment, 0..255
+ * @radial_shift: right shift of each segment's slope, 0..15
+ * @radial_x: column of the frame's left edge from the optical centre,
+ *	      -8192..8191
+ * @radial_y: row of the frame's top edge from the optical centre,
+ *	      -8192..8191
+ * @radial_r2_shift: right shift taking squared distances to the anchors'
+ *		     scale, 0..15
+ * @reserved: must be zero
+ *
+ * The field meanings are those of the Windows driver, where it names them; the
+ * hardware behaviour of most is not verified. The driver loads the noise
+ * table into the inactive LUT bank and switches banks with the next register
+ * update. With two IFEs, it gives the right one the distances of its own
+ * columns. V4L2_ISP_PARAMS_FL_BLOCK_DISABLE bypasses the block.
+ */
+struct ife17x_params_abf {
+	struct v4l2_isp_params_block_header header;
+	__u16 noise[IFE17X_ABF_NOISE_NODES];
+	__u16 flags;
+	__u8 pixel_match[2];
+	__u8 distance_ker[2][3];
+	__u8 curve_offset[4];
+	__u8 bpc_fmax;
+	__u8 bpc_fmin;
+	__u8 bpc_max_shift;
+	__u8 bpc_min_shift;
+	__u16 bpc_offset;
+	__u16 black_level;
+	__u16 noise_prsv_anchor;
+	__u16 noise_prsv_gap;
+	__u16 noise_prsv_lo[2];
+	__s16 noise_prsv_slope[2];
+	__u8 noise_prsv_shift[2];
+	__u16 radial_anchor[4];
+	__u8 radial_gain[2][4];
+	__u8 radial_slope[2][4];
+	__u8 radial_shift[2][4];
+	__s16 radial_x;
+	__s16 radial_y;
+	__u8 radial_r2_shift;
+	__u8 reserved[5];
+} __attribute__((aligned(8)));
+
 #define IFE17X_PARAMS_MAX_SIZE					\
 	(sizeof(struct ife17x_params_bls) +			\
 	 sizeof(struct ife17x_params_wb) +			\
@@ -287,7 +367,8 @@ struct ife17x_params_bf {
 	 sizeof(struct ife17x_params_gamma) +			\
 	 sizeof(struct ife17x_params_awb_bg) +			\
 	 sizeof(struct ife17x_params_pdpc) +			\
-	 sizeof(struct ife17x_params_bf))
+	 sizeof(struct ife17x_params_bf) +			\
+	 sizeof(struct ife17x_params_abf))
 
 /**
  * struct ife17x_awb_bg_region - AWB Bayer grid record, as the hardware

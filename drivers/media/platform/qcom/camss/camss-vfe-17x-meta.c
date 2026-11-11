@@ -35,6 +35,7 @@
 
 /* Module enables, double buffered */
 #define VFE_MODULE_LENS_EN		0x040
+#define		LENS_EN_ABF		BIT(7)
 #define		LENS_EN_BLS		BIT(11)
 #define		LENS_EN_PDPC		BIT(13)
 #define VFE_MODULE_STATS_EN		0x044
@@ -55,6 +56,30 @@
  */
 #define		CAMIF_EPOCH0_LINE	20
 #define		CAMIF_EPOCH_CFG(height)	(CAMIF_EPOCH0_LINE << 16 | ((height) * 3 / 4))
+
+/*
+ * ABF34, from the Windows driver: 0x5e8 configuration, 0x5f4..0x648 the rest,
+ * the noise LUT in DMI bank 12 or 13 (0x5e8 bit 1 selects 13)
+ */
+#define VFE_ABF_CFG			0x5e8
+#define		ABF_CFG_FILTER		BIT(0)
+#define		ABF_CFG_LUT_BANK	BIT(1)
+#define		ABF_CFG_RADIAL		BIT(2)
+#define		ABF_CFG_BPC		BIT(3)
+#define VFE_ABF_CURVE_OFFSET(c)		(0x5f4 + (c) * 4)
+#define VFE_ABF_RADIAL_POS		0x604	/* x [13:0], y [29:16] */
+#define VFE_ABF_RADIAL_R2_INIT		0x608
+#define VFE_ABF_RADIAL_ANCHOR(i)	(0x60c + (i) * 4)	/* two per register */
+#define VFE_ABF_RADIAL_SEG(c, s)	(0x614 + (c) * 0x10 + (s) * 4)
+#define VFE_ABF_RADIAL_R2_SHIFT		0x634
+#define VFE_ABF_BPC_0			0x638
+#define VFE_ABF_BPC_1			0x63c
+#define VFE_ABF_NOISE_PRSV_ANCHOR	0x640
+#define VFE_ABF_NOISE_PRSV(c)		(0x644 + (c) * 4)
+#define VFE_ABF_DMI_BANK		12
+#define ABF_LUT_ENTRIES			(IFE17X_ABF_NOISE_NODES - 1)
+/* The squared distance register is 28 bits wide */
+#define ABF_R2_MAX			GENMASK(27, 0)
 
 #define VFE_BLS_CFG			0x6b0
 #define		BLS_CFG_SCALE		15
@@ -229,6 +254,7 @@ struct vfe_pix_meta {
 	u64 epoch_ns;		/* time of the last epoch 0 */
 	u64 period_ns;		/* between the last two epochs 0 */
 	u8 gamma_bank;		/* LUT banks in use: 0 even, 1 odd */
+	u8 abf_bank;		/* ABF noise LUT bank in use */
 	bool awb_bg_pending;	/* AWB block seen before the stream start */
 	struct ife17x_params_awb_bg awb_bg;
 	bool pdpc_mask_valid;	/* the PDPC mask bank holds pdpc_mask */
@@ -301,6 +327,7 @@ union ife_params_block {
 	const struct ife17x_params_awb_bg *awb_bg;
 	const struct ife17x_params_pdpc *pdpc;
 	const struct ife17x_params_bf *bf;
+	const struct ife17x_params_abf *abf;
 	const u8 *data;
 };
 
@@ -687,6 +714,81 @@ static void ife_params_bf(struct vfe_pix_meta *meta, union ife_params_block bloc
 	ife_stats_enable(meta, STATS_EN_BF, true);
 }
 
+/*
+ * Adaptive Bayer filter. The noise table goes to the inactive LUT bank, like
+ * the gamma curves. Each LUT entry holds a node and the step down to the next.
+ * The radial distances start from the IFE's own input column 0: with two IFEs
+ * the right one starts at frame_x.
+ */
+static void ife_params_abf(struct vfe_pix_meta *meta, union ife_params_block block)
+{
+	const struct ife17x_params_abf *abf = block.abf;
+	struct vfe_device *vfe = meta->vfe;
+	u8 bank = !meta->abf_bank;
+	s64 x, y, r2;
+	unsigned int i, c;
+	u32 cfg;
+
+	if (ife_block_disabled(block)) {
+		vfe_rmw(vfe, VFE_MODULE_LENS_EN, LENS_EN_ABF, 0);
+		return;
+	}
+
+	writel_relaxed((VFE_ABF_DMI_BANK + bank) | DMI_CFG_AUTO_INC, vfe->base + VFE_DMI_CFG);
+	writel_relaxed(0, vfe->base + VFE_DMI_ADDR);
+	for (i = 0; i < ABF_LUT_ENTRIES; i++)
+		writel_relaxed(abf->noise[i] | (u32)(abf->noise[i] - abf->noise[i + 1]) << 9,
+			       vfe->base + VFE_DMI_DATA_LO);
+	writel_relaxed(0, vfe->base + VFE_DMI_CFG);
+
+	for (c = 0; c < 4; c++)
+		writel_relaxed(abf->curve_offset[c], vfe->base + VFE_ABF_CURVE_OFFSET(c));
+
+	x = (s64)abf->radial_x + meta->frame_x;
+	y = abf->radial_y;
+	r2 = min_t(s64, x * x + y * y, ABF_R2_MAX);
+	x = clamp_t(s64, x, -8192, 8191);
+	writel_relaxed(((u32)x & 0x3fff) | ((u32)y & 0x3fff) << 16,
+		       vfe->base + VFE_ABF_RADIAL_POS);
+	writel_relaxed(r2, vfe->base + VFE_ABF_RADIAL_R2_INIT);
+	for (i = 0; i < 2; i++)
+		writel_relaxed(abf->radial_anchor[2 * i] | abf->radial_anchor[2 * i + 1] << 16,
+			       vfe->base + VFE_ABF_RADIAL_ANCHOR(i));
+	for (c = 0; c < 2; c++)
+		for (i = 0; i < 4; i++)
+			writel_relaxed(abf->radial_gain[c][i] | abf->radial_slope[c][i] << 8 |
+				       abf->radial_shift[c][i] << 16,
+				       vfe->base + VFE_ABF_RADIAL_SEG(c, i));
+	writel_relaxed(abf->radial_r2_shift, vfe->base + VFE_ABF_RADIAL_R2_SHIFT);
+
+	writel_relaxed(abf->bpc_fmax | abf->bpc_fmin << 8 | abf->bpc_offset << 16,
+		       vfe->base + VFE_ABF_BPC_0);
+	writel_relaxed(abf->bpc_min_shift | abf->bpc_max_shift << 4 | abf->black_level << 8,
+		       vfe->base + VFE_ABF_BPC_1);
+	writel_relaxed(abf->noise_prsv_anchor | abf->noise_prsv_gap << 16,
+		       vfe->base + VFE_ABF_NOISE_PRSV_ANCHOR);
+	for (c = 0; c < 2; c++)
+		writel_relaxed(abf->noise_prsv_lo[c] |
+			       ((u32)abf->noise_prsv_slope[c] & 0x3ff) << 12 |
+			       abf->noise_prsv_shift[c] << 24,
+			       vfe->base + VFE_ABF_NOISE_PRSV(c));
+
+	cfg = bank ? ABF_CFG_LUT_BANK : 0;
+	if (abf->flags & IFE17X_ABF_FL_FILTER)
+		cfg |= ABF_CFG_FILTER;
+	if (abf->flags & IFE17X_ABF_FL_RADIAL)
+		cfg |= ABF_CFG_RADIAL;
+	if (abf->flags & IFE17X_ABF_FL_BPC)
+		cfg |= ABF_CFG_BPC;
+	cfg |= abf->pixel_match[1] << 4 | abf->pixel_match[0] << 8;
+	for (c = 0; c < 2; c++)
+		cfg |= (abf->distance_ker[c][0] | abf->distance_ker[c][1] << 4 |
+			abf->distance_ker[c][2] << 6) << (12 + 8 * c);
+	writel_relaxed(cfg, vfe->base + VFE_ABF_CFG);
+	meta->abf_bank = bank;
+	vfe_rmw(vfe, VFE_MODULE_LENS_EN, 0, LENS_EN_ABF);
+}
+
 static const ife_params_handler ife_params_handlers[] = {
 	[IFE17X_PARAMS_BLOCK_BLS] = ife_params_bls,
 	[IFE17X_PARAMS_BLOCK_WB] = ife_params_wb,
@@ -695,6 +797,7 @@ static const ife_params_handler ife_params_handlers[] = {
 	[IFE17X_PARAMS_BLOCK_AWB_BG] = ife_params_awb_bg,
 	[IFE17X_PARAMS_BLOCK_PDPC] = ife_params_pdpc,
 	[IFE17X_PARAMS_BLOCK_BF] = ife_params_bf,
+	[IFE17X_PARAMS_BLOCK_ABF] = ife_params_abf,
 };
 
 static const struct v4l2_isp_params_block_type_info ife_params_block_types[] = {
@@ -705,6 +808,7 @@ static const struct v4l2_isp_params_block_type_info ife_params_block_types[] = {
 	[IFE17X_PARAMS_BLOCK_AWB_BG] = { .size = sizeof(struct ife17x_params_awb_bg) },
 	[IFE17X_PARAMS_BLOCK_PDPC] = { .size = sizeof(struct ife17x_params_pdpc) },
 	[IFE17X_PARAMS_BLOCK_BF] = { .size = sizeof(struct ife17x_params_bf) },
+	[IFE17X_PARAMS_BLOCK_ABF] = { .size = sizeof(struct ife17x_params_abf) },
 };
 
 static_assert(ARRAY_SIZE(ife_params_handlers) == ARRAY_SIZE(ife_params_block_types));
@@ -991,6 +1095,8 @@ void vfe17x_meta_start(struct vfe_device *vfe, u32 width, u32 height)
 	}
 	/* The default setup filled every gamma bank and selected bank 0 */
 	meta->gamma_bank = 0;
+	/* The VFE was reset: ABF is off and selects bank 12 */
+	meta->abf_bank = 0;
 	/* The VFE was reset: the mask bank must be written again */
 	meta->pdpc_mask_valid = false;
 	/* Likewise the focus statistics, and no statistics are on */
@@ -1590,6 +1696,51 @@ static int ife_bf_check(struct device *dev, const struct ife17x_params_bf *bf)
 }
 
 /* Ranges and reserved fields of the blocks other than BF */
+static int ife_abf_check(struct device *dev, const struct ife17x_params_abf *abf)
+{
+	static const u8 ker_min[3] = { 1, 0, 0 }, ker_max[3] = { 4, 2, 1 };
+	unsigned int i, c;
+
+	/* The LUT holds each step down to the next node in 9 bits */
+	for (i = 0; i < IFE17X_ABF_NOISE_NODES; i++)
+		if (abf->noise[i] > 511 || (i && abf->noise[i] > abf->noise[i - 1]))
+			goto invalid;
+	if (abf->flags & ~(IFE17X_ABF_FL_FILTER | IFE17X_ABF_FL_RADIAL | IFE17X_ABF_FL_BPC))
+		goto invalid;
+	for (c = 0; c < 2; c++) {
+		if (abf->pixel_match[c] > 4 || abf->noise_prsv_lo[c] > 256 ||
+		    abf->noise_prsv_slope[c] < -256 || abf->noise_prsv_slope[c] > 256 ||
+		    abf->noise_prsv_shift[c] > 10)
+			goto invalid;
+		for (i = 0; i < 3; i++)
+			if (abf->distance_ker[c][i] < ker_min[i] ||
+			    abf->distance_ker[c][i] > ker_max[i])
+				goto invalid;
+		for (i = 0; i < 4; i++)
+			if (abf->radial_shift[c][i] > 15)
+				goto invalid;
+	}
+	for (c = 0; c < 4; c++)
+		if (abf->curve_offset[c] > 64)
+			goto invalid;
+	for (i = 0; i < 4; i++)
+		if (abf->radial_anchor[i] > 4095 ||
+		    (i && abf->radial_anchor[i] < abf->radial_anchor[i - 1]))
+			goto invalid;
+	if (abf->bpc_fmax > 63 || abf->bpc_fmin > 63 || abf->bpc_max_shift > 14 ||
+	    abf->bpc_min_shift > 14 || abf->bpc_offset > 4095 || abf->black_level > 4095 ||
+	    abf->noise_prsv_anchor > 1023 || abf->noise_prsv_gap > 1023 ||
+	    abf->radial_x < -8192 || abf->radial_x > 8191 ||
+	    abf->radial_y < -8192 || abf->radial_y > 8191 || abf->radial_r2_shift > 15 ||
+	    memchr_inv(abf->reserved, 0, sizeof(abf->reserved)))
+		goto invalid;
+	return 0;
+
+invalid:
+	dev_dbg(dev, "invalid adaptive Bayer filter parameters\n");
+	return -EINVAL;
+}
+
 static int ife_params_check(struct device *dev, union ife_params_block block)
 {
 	unsigned int i, j;
@@ -1656,6 +1807,8 @@ static int ife_params_check(struct device *dev, union ife_params_block block)
 		break;
 	case IFE17X_PARAMS_BLOCK_BF:
 		return ife_bf_check(dev, block.bf);
+	case IFE17X_PARAMS_BLOCK_ABF:
+		return ife_abf_check(dev, block.abf);
 	}
 	return 0;
 
