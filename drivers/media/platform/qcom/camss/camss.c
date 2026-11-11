@@ -2667,6 +2667,7 @@ static const struct camss_subdev_resources csid_res_sc8280xp[] = {
 		.reg = { "csid0" },
 		.interrupt = { "csid0" },
 		.csid = {
+			.has_ipp = true,
 			.hw_ops = &csid_ops_gen2,
 			.parent_dev_ops = &vfe_parent_dev_ops,
 			.formats = &csid_formats_gen2
@@ -2686,6 +2687,7 @@ static const struct camss_subdev_resources csid_res_sc8280xp[] = {
 		.reg = { "csid1" },
 		.interrupt = { "csid1" },
 		.csid = {
+			.has_ipp = true,
 			.hw_ops = &csid_ops_gen2,
 			.parent_dev_ops = &vfe_parent_dev_ops,
 			.formats = &csid_formats_gen2
@@ -2705,6 +2707,7 @@ static const struct camss_subdev_resources csid_res_sc8280xp[] = {
 		.reg = { "csid2" },
 		.interrupt = { "csid2" },
 		.csid = {
+			.has_ipp = true,
 			.hw_ops = &csid_ops_gen2,
 			.parent_dev_ops = &vfe_parent_dev_ops,
 			.formats = &csid_formats_gen2
@@ -2724,6 +2727,7 @@ static const struct camss_subdev_resources csid_res_sc8280xp[] = {
 		.reg = { "csid3" },
 		.interrupt = { "csid3" },
 		.csid = {
+			.has_ipp = true,
 			.hw_ops = &csid_ops_gen2,
 			.parent_dev_ops = &vfe_parent_dev_ops,
 			.formats = &csid_formats_gen2
@@ -2825,7 +2829,8 @@ static const struct camss_subdev_resources vfe_res_sc8280xp[] = {
 			.pd_name = "ife0",
 			.hw_ops = &vfe_ops_170,
 			.formats_rdi = &vfe_formats_rdi_845,
-			.formats_pix = &vfe_formats_pix_845
+			.formats_pix = &vfe_formats_pix_8280xp,
+			.formats_pix_out = &vfe_formats_pix_out_8280xp
 		}
 	},
 	/* VFE1 */
@@ -2845,7 +2850,8 @@ static const struct camss_subdev_resources vfe_res_sc8280xp[] = {
 			.pd_name = "ife1",
 			.hw_ops = &vfe_ops_170,
 			.formats_rdi = &vfe_formats_rdi_845,
-			.formats_pix = &vfe_formats_pix_845
+			.formats_pix = &vfe_formats_pix_8280xp,
+			.formats_pix_out = &vfe_formats_pix_out_8280xp
 		}
 	},
 	/* VFE2 */
@@ -2865,7 +2871,8 @@ static const struct camss_subdev_resources vfe_res_sc8280xp[] = {
 			.pd_name = "ife2",
 			.hw_ops = &vfe_ops_170,
 			.formats_rdi = &vfe_formats_rdi_845,
-			.formats_pix = &vfe_formats_pix_845
+			.formats_pix = &vfe_formats_pix_8280xp,
+			.formats_pix_out = &vfe_formats_pix_out_8280xp
 		}
 	},
 	/* VFE3 */
@@ -2885,7 +2892,8 @@ static const struct camss_subdev_resources vfe_res_sc8280xp[] = {
 			.pd_name = "ife3",
 			.hw_ops = &vfe_ops_170,
 			.formats_rdi = &vfe_formats_rdi_845,
-			.formats_pix = &vfe_formats_pix_845
+			.formats_pix = &vfe_formats_pix_8280xp,
+			.formats_pix_out = &vfe_formats_pix_out_8280xp
 		}
 	},
 	/* VFE_LITE_0 */
