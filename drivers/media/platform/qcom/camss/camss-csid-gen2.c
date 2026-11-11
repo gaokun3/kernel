@@ -25,6 +25,28 @@
 #define CSID_RST_STROBES	0x10
 #define		RST_STROBES	0
 
+/*
+ * Image pixel path (IPP) of a full CSID. It feeds the CAMIF input of the
+ * VFE pixel pipeline (VFE_LINE_PIX) and is exposed on CSID source port 3.
+ * The register block has the RDI layout, located at 0x200.
+ */
+#define CSID_PORT_IPP			3
+
+#define CSID_IPP_IRQ_STATUS		0x30
+#define CSID_IPP_IRQ_CLEAR		0x38
+#define CSID_IPP_CFG0			0x200
+#define		IPP_CFG0_PIX_STORE_EN	7
+#define CSID_IPP_CFG1			0x204
+#define CSID_IPP_CTRL			0x208
+#define CSID_IPP_FRM_DROP_PATTERN	0x20c
+#define CSID_IPP_FRM_DROP_PERIOD	0x210
+#define CSID_IPP_IRQ_SUBSAMPLE_PATTERN	0x214
+#define CSID_IPP_IRQ_SUBSAMPLE_PERIOD	0x218
+#define CSID_IPP_PIX_DROP_PATTERN	0x224
+#define CSID_IPP_PIX_DROP_PERIOD	0x228
+#define CSID_IPP_LINE_DROP_PATTERN	0x22c
+#define CSID_IPP_LINE_DROP_PERIOD	0x230
+
 #define CSID_CSI2_RX_IRQ_STATUS	0x20
 #define	CSID_CSI2_RX_IRQ_MASK	0x24
 #define CSID_CSI2_RX_IRQ_CLEAR	0x28
@@ -322,6 +344,67 @@ static void __csid_configure_rdi_stream(struct csid_device *csid, u8 enable, u8 
 	writel_relaxed(val, csid->base + CSID_RDI_CFG0(port));
 }
 
+static bool csid_port_is_ipp(struct csid_device *csid, u8 port)
+{
+	return csid->res->has_ipp && port == CSID_PORT_IPP;
+}
+
+static void __csid_ctrl_ipp(struct csid_device *csid, int enable)
+{
+	u32 val;
+
+	if (enable)
+		val = HALT_CMD_RESUME_AT_FRAME_BOUNDARY << RDI_CTRL_HALT_CMD;
+	else
+		val = HALT_CMD_HALT_AT_FRAME_BOUNDARY << RDI_CTRL_HALT_CMD;
+	writel_relaxed(val, csid->base + CSID_IPP_CTRL);
+}
+
+/*
+ * The IPP decodes the CSI-2 payload into pixels for the VFE, so it uses the
+ * real decode format of the data type instead of PAYLOAD_ONLY. The enable
+ * bits follow the Windows SC8280XP ISP driver: byte counter, format measure,
+ * pixel store and MSB plain alignment (cfg0 bits 0, 1, 7 and 9).
+ */
+static void __csid_configure_ipp_stream(struct csid_device *csid, u8 enable, u8 vc)
+{
+	struct v4l2_mbus_framefmt *input_format =
+		&csid->fmt[MSM_CSID_PAD_FIRST_SRC + CSID_PORT_IPP];
+	const struct csid_format_info *format = csid_get_fmt_entry(csid->res->formats->formats,
+								   csid->res->formats->nformats,
+								   input_format->code);
+	u8 dt_id = CSID_PORT_IPP & 0x03;
+	u32 val;
+
+	val = 1 << RDI_CFG0_BYTE_CNTR_EN;
+	val |= 1 << RDI_CFG0_FORMAT_MEASURE_EN;
+	val |= 1 << IPP_CFG0_PIX_STORE_EN;
+	val |= PLAIN_ALIGNMENT_MSB << RDI_CFG0_PLAIN_ALIGNMENT;
+	val |= format->decode_format << RDI_CFG0_DECODE_FORMAT;
+	val |= format->data_type << RDI_CFG0_DATA_TYPE;
+	val |= vc << RDI_CFG0_VIRTUAL_CHANNEL;
+	val |= dt_id << RDI_CFG0_DT_ID;
+	writel_relaxed(val, csid->base + CSID_IPP_CFG0);
+
+	/* CSID_TIMESTAMP_STB_POST_IRQ */
+	writel_relaxed(2 << RDI_CFG1_TIMESTAMP_STB_SEL, csid->base + CSID_IPP_CFG1);
+
+	/* Keep every frame, line and pixel */
+	writel_relaxed(1, csid->base + CSID_IPP_FRM_DROP_PERIOD);
+	writel_relaxed(0, csid->base + CSID_IPP_FRM_DROP_PATTERN);
+	writel_relaxed(1, csid->base + CSID_IPP_IRQ_SUBSAMPLE_PERIOD);
+	writel_relaxed(0, csid->base + CSID_IPP_IRQ_SUBSAMPLE_PATTERN);
+	writel_relaxed(1, csid->base + CSID_IPP_PIX_DROP_PERIOD);
+	writel_relaxed(0, csid->base + CSID_IPP_PIX_DROP_PATTERN);
+	writel_relaxed(1, csid->base + CSID_IPP_LINE_DROP_PERIOD);
+	writel_relaxed(0, csid->base + CSID_IPP_LINE_DROP_PATTERN);
+
+	writel_relaxed(0, csid->base + CSID_IPP_CTRL);
+
+	val |= enable << RDI_CFG0_ENABLE;
+	writel_relaxed(val, csid->base + CSID_IPP_CFG0);
+}
+
 static void csid_configure_stream(struct csid_device *csid, u8 enable)
 {
 	struct csid_testgen_config *tg = &csid->testgen;
@@ -333,9 +416,15 @@ static void csid_configure_stream(struct csid_device *csid, u8 enable)
 			if (tg->enabled)
 				__csid_configure_testgen(csid, enable, i, 0);
 
-			__csid_configure_rdi_stream(csid, enable, i, 0);
-			__csid_configure_rx(csid, &csid->phy, 0);
-			__csid_ctrl_rdi(csid, enable, i);
+			if (csid_port_is_ipp(csid, i)) {
+				__csid_configure_ipp_stream(csid, enable, 0);
+				__csid_configure_rx(csid, &csid->phy, 0);
+				__csid_ctrl_ipp(csid, enable);
+			} else {
+				__csid_configure_rdi_stream(csid, enable, i, 0);
+				__csid_configure_rx(csid, &csid->phy, 0);
+				__csid_ctrl_rdi(csid, enable, i);
+			}
 		}
 }
 
@@ -371,6 +460,12 @@ static irqreturn_t csid_isr(int irq, void *dev)
 	/* Read and clear IRQ status for each enabled RDI channel */
 	for (i = 0; i < MSM_CSID_MAX_SRC_STREAMS; i++)
 		if (csid->phy.en_vc & BIT(i)) {
+			if (csid_port_is_ipp(csid, i)) {
+				val = readl_relaxed(csid->base + CSID_IPP_IRQ_STATUS);
+				writel_relaxed(val, csid->base + CSID_IPP_IRQ_CLEAR);
+				continue;
+			}
+
 			val = readl_relaxed(csid->base + CSID_CSI2_RDIN_IRQ_STATUS(i));
 			writel_relaxed(val, csid->base + CSID_CSI2_RDIN_IRQ_CLEAR(i));
 		}
