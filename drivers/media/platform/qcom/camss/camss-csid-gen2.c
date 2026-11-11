@@ -35,7 +35,10 @@
 #define CSID_IPP_IRQ_STATUS		0x30
 #define CSID_IPP_IRQ_CLEAR		0x38
 #define CSID_IPP_CFG0			0x200
+#define		IPP_CFG0_CROP_H_EN	5
+#define		IPP_CFG0_CROP_V_EN	6
 #define		IPP_CFG0_PIX_STORE_EN	7
+#define		IPP_CFG0_EARLY_EOF_EN	29
 #define CSID_IPP_CFG1			0x204
 #define CSID_IPP_CTRL			0x208
 #define CSID_IPP_FRM_DROP_PATTERN	0x20c
@@ -46,6 +49,9 @@
 #define CSID_IPP_PIX_DROP_PERIOD	0x228
 #define CSID_IPP_LINE_DROP_PATTERN	0x22c
 #define CSID_IPP_LINE_DROP_PERIOD	0x230
+/* Crops: last << 16 | first, inclusive (downstream cam_ife_csid175.h) */
+#define CSID_IPP_HCROP			0x21c
+#define CSID_IPP_VCROP			0x220
 
 #define CSID_CSI2_RX_IRQ_STATUS	0x20
 #define	CSID_CSI2_RX_IRQ_MASK	0x24
@@ -370,6 +376,8 @@ static void __csid_configure_ipp_stream(struct csid_device *csid, u8 enable, u8 
 {
 	struct v4l2_mbus_framefmt *input_format =
 		&csid->fmt[MSM_CSID_PAD_FIRST_SRC + CSID_PORT_IPP];
+	const struct v4l2_mbus_framefmt *sink = &csid->fmt[MSM_CSID_PAD_SINK];
+	const struct v4l2_rect *crop = &csid->ipp_crop;
 	const struct csid_format_info *format = csid_get_fmt_entry(csid->res->formats->formats,
 								   csid->res->formats->nformats,
 								   input_format->code);
@@ -384,6 +392,16 @@ static void __csid_configure_ipp_stream(struct csid_device *csid, u8 enable, u8 
 	val |= format->data_type << RDI_CFG0_DATA_TYPE;
 	val |= vc << RDI_CFG0_VIRTUAL_CHANNEL;
 	val |= dt_id << RDI_CFG0_DT_ID;
+
+	/* Crop, with the end of frame at the crop end like downstream */
+	if (crop->width && (crop->width != sink->width || crop->height != sink->height)) {
+		val |= BIT(IPP_CFG0_CROP_H_EN) | BIT(IPP_CFG0_CROP_V_EN) |
+		       BIT(IPP_CFG0_EARLY_EOF_EN);
+		writel_relaxed((crop->left + crop->width - 1) << 16 | crop->left,
+			       csid->base + CSID_IPP_HCROP);
+		writel_relaxed((crop->top + crop->height - 1) << 16 | crop->top,
+			       csid->base + CSID_IPP_VCROP);
+	}
 	writel_relaxed(val, csid->base + CSID_IPP_CFG0);
 
 	/* CSID_TIMESTAMP_STB_POST_IRQ */

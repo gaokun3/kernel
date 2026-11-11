@@ -23,6 +23,8 @@
 #define MSM_CSID_PADS_NUM 5
 
 #define MSM_CSID_PAD_SRC (MSM_CSID_PAD_FIRST_SRC)
+/* Source pad of the IPP on a full CSID with a pixel path (port 3) */
+#define MSM_CSID_PAD_IPP (MSM_CSID_PAD_FIRST_SRC + 3)
 
 /* CSID hardware can demultiplex up to 4 outputs */
 #define MSM_CSID_MAX_SRC_STREAMS	4
@@ -166,6 +168,8 @@ struct csid_device {
 	bool tpg_linked;
 	struct csid_phy_config phy;
 	struct v4l2_mbus_framefmt fmt[MSM_CSID_PADS_NUM];
+	/* Crop of the IPP output within the sink format (active format only) */
+	struct v4l2_rect ipp_crop;
 	struct v4l2_ctrl_handler ctrls;
 	struct v4l2_ctrl *testgen_mode;
 	const struct csid_subdev_resources *res;

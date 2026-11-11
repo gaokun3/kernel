@@ -870,6 +870,18 @@ static void csid_try_format(struct csid_device *csid,
 			fmt->field = V4L2_FIELD_NONE;
 		}
 		break;
+
+	case MSM_CSID_PAD_IPP:
+		if (!csid->res->has_ipp)
+			break;
+
+		/* The IPP passes the sink format, cropped */
+		*fmt = *__csid_get_format(csid, sd_state, MSM_CSID_PAD_SINK, which);
+		if (which == V4L2_SUBDEV_FORMAT_ACTIVE && csid->ipp_crop.width) {
+			fmt->width = csid->ipp_crop.width;
+			fmt->height = csid->ipp_crop.height;
+		}
+		break;
 	}
 
 	fmt->colorspace = V4L2_COLORSPACE_SRGB;
@@ -1003,6 +1015,10 @@ static int csid_set_format(struct v4l2_subdev *sd,
 
 	/* Propagate the format from sink to source pads */
 	if (fmt->pad == MSM_CSID_PAD_SINK) {
+		/* A new sink format resets the IPP crop to the whole frame */
+		if (fmt->which == V4L2_SUBDEV_FORMAT_ACTIVE)
+			csid->ipp_crop = (struct v4l2_rect){ 0, 0, fmt->format.width,
+							     fmt->format.height };
 		for (i = MSM_CSID_PAD_FIRST_SRC; i < MSM_CSID_PADS_NUM; ++i) {
 			format = __csid_get_format(csid, sd_state, i, fmt->which);
 
@@ -1325,11 +1341,67 @@ static const struct v4l2_subdev_video_ops csid_video_ops = {
 	.s_stream = csid_set_stream,
 };
 
+/*
+ * The IPP of a full CSID can crop its output. Only the active configuration
+ * is kept: the crop is programmed at stream start.
+ */
+static int csid_get_selection(struct v4l2_subdev *sd,
+			      struct v4l2_subdev_state *sd_state,
+			      struct v4l2_subdev_selection *sel)
+{
+	struct csid_device *csid = v4l2_get_subdevdata(sd);
+	const struct v4l2_mbus_framefmt *sink = &csid->fmt[MSM_CSID_PAD_SINK];
+
+	if (!csid->res->has_ipp || sel->pad != MSM_CSID_PAD_IPP ||
+	    sel->which != V4L2_SUBDEV_FORMAT_ACTIVE)
+		return -EINVAL;
+
+	switch (sel->target) {
+	case V4L2_SEL_TGT_CROP_BOUNDS:
+	case V4L2_SEL_TGT_CROP_DEFAULT:
+		sel->r = (struct v4l2_rect){ 0, 0, sink->width, sink->height };
+		return 0;
+	case V4L2_SEL_TGT_CROP:
+		sel->r = csid->ipp_crop;
+		return 0;
+	}
+
+	return -EINVAL;
+}
+
+static int csid_set_selection(struct v4l2_subdev *sd,
+			      struct v4l2_subdev_state *sd_state,
+			      struct v4l2_subdev_selection *sel)
+{
+	struct csid_device *csid = v4l2_get_subdevdata(sd);
+	const struct v4l2_mbus_framefmt *sink = &csid->fmt[MSM_CSID_PAD_SINK];
+	struct v4l2_rect *r = &sel->r;
+
+	if (!csid->res->has_ipp || sel->pad != MSM_CSID_PAD_IPP ||
+	    sel->which != V4L2_SUBDEV_FORMAT_ACTIVE ||
+	    sel->target != V4L2_SEL_TGT_CROP)
+		return -EINVAL;
+
+	/* Even offsets and sizes keep the Bayer order */
+	r->left = clamp_t(s32, r->left, 0, sink->width - 2) & ~1;
+	r->top = clamp_t(s32, r->top, 0, sink->height - 2) & ~1;
+	r->width = clamp_t(u32, r->width, 2, sink->width - r->left) & ~1;
+	r->height = clamp_t(u32, r->height, 2, sink->height - r->top) & ~1;
+
+	csid->ipp_crop = *r;
+	csid->fmt[MSM_CSID_PAD_IPP].width = r->width;
+	csid->fmt[MSM_CSID_PAD_IPP].height = r->height;
+
+	return 0;
+}
+
 static const struct v4l2_subdev_pad_ops csid_pad_ops = {
 	.enum_mbus_code = csid_enum_mbus_code,
 	.enum_frame_size = csid_enum_frame_size,
 	.get_fmt = csid_get_format,
 	.set_fmt = csid_set_format,
+	.get_selection = csid_get_selection,
+	.set_selection = csid_set_selection,
 };
 
 static const struct v4l2_subdev_ops csid_v4l2_ops = {
