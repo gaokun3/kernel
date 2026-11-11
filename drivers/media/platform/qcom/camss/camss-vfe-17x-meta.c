@@ -153,6 +153,23 @@ struct vfe_pix_meta {
 	struct ife17x_params_awb_bg awb_bg;
 	bool pdpc_mask_valid;	/* the PDPC mask bank holds pdpc_mask */
 	u32 pdpc_mask[IFE17X_PDPC_MASK_ROWS];
+
+	/*
+	 * Dual IFE, under the master's lock: the master applies its parameters
+	 * to the slave too, and the two grids share the statistics buffers.
+	 */
+	struct vfe_pix_meta *dual_slave;	/* master */
+	struct vfe_pix_meta *dual_master;	/* slave */
+	u32 stripe_x;		/* first input column the grid covers */
+	u32 stripe_w;		/* input columns the grid covers */
+	u32 frame_x;		/* frame column of input column 0 */
+	u32 slave_stats_off;	/* master: byte offset of the slave's grid */
+	u64 slave_stats_ts;	/* master: when the slave last wrote a grid */
+	unsigned int nheld;	/* master: buffers waiting for the slave's grid */
+	struct {
+		struct ife_stats_buf *buf;
+		u64 ts;
+	} held[4];
 };
 
 static inline struct ife_params_buf *to_params_buf(struct vb2_v4l2_buffer *vbuf)
@@ -333,11 +350,23 @@ static void ife_awb_bg_program(struct vfe_pix_meta *meta,
 	struct vfe_device *vfe = meta->vfe;
 	u32 hn = clamp_t(u32, cfg->h_num, 1, IFE17X_AWB_BG_MAX_H);
 	u32 vn = clamp_t(u32, cfg->v_num, 1, IFE17X_AWB_BG_MAX_V);
-	u32 rw = clamp_t(u32, (meta->width / hn) & ~1U, 6, 390);
-	u32 rh = clamp_t(u32, (meta->height / vn) & ~1U, 2, 512);
+	u32 rw, rh = clamp_t(u32, (meta->height / vn) & ~1U, 2, 512);
 	const u16 *t = cfg->threshold;
 
-	writel_relaxed(0, vfe->base + VFE_AWB_BG_OFFSET);
+	/*
+	 * Dual IFE: the master takes the left half of the grid columns over
+	 * its stripe, the slave the right half over its own, and the slave's
+	 * records follow the master's in the buffer.
+	 */
+	if (meta->dual_slave && hn > 1) {
+		hn /= 2;
+		meta->slave_stats_off = hn * vn * sizeof(struct ife17x_awb_bg_region);
+	} else if (meta->dual_master && hn > 1) {
+		hn -= hn / 2;
+	}
+	rw = clamp_t(u32, (meta->stripe_w / hn) & ~1U, 6, 390);
+
+	writel_relaxed(meta->stripe_x & ~1U, vfe->base + VFE_AWB_BG_OFFSET);
 	writel_relaxed((hn - 1) | (vn - 1) << 16, vfe->base + VFE_AWB_BG_NUM);
 	writel_relaxed((rw - 1) | (rh - 1) << 16, vfe->base + VFE_AWB_BG_SIZE);
 	writel_relaxed((t[0] & 0x3fff) | (t[2] & 0x3fff) << 16,
@@ -399,6 +428,8 @@ static bool ife_params_apply_next(struct vfe_pix_meta *meta, u32 sequence)
 
 		/* Validated in .buf_prepare() */
 		ife_params_handlers[block.header->type](meta, block);
+		if (meta->dual_slave)
+			ife_params_handlers[block.header->type](meta->dual_slave, block);
 		off += block.header->size;
 	}
 
@@ -436,6 +467,49 @@ static void ife_stats_set_addr(struct vfe_pix_meta *meta, dma_addr_t addr)
 
 	writel_relaxed(lower_32_bits(addr), vfe->base + VFE_BUS_WM_IMAGE_ADDR(VFE_WM_AWB_BG));
 	writel_relaxed(IFE_STATS_SIZE, vfe->base + VFE_BUS_WM_FRAME_INC(VFE_WM_AWB_BG));
+
+	/* Dual IFE: the slave's grid goes after the master's */
+	if (meta->dual_slave) {
+		void __iomem *s = meta->dual_slave->vfe->base;
+
+		writel_relaxed(lower_32_bits(addr) + meta->slave_stats_off,
+			       s + VFE_BUS_WM_IMAGE_ADDR(VFE_WM_AWB_BG));
+		writel_relaxed(IFE_STATS_SIZE, s + VFE_BUS_WM_FRAME_INC(VFE_WM_AWB_BG));
+	}
+}
+
+/*
+ * Master's lock held, the slave wrote a grid at @ts: the held buffer of that
+ * frame is complete, older ones lack the slave's grid.
+ */
+static void ife_stats_dual_collect(struct vfe_pix_meta *meta, u64 ts)
+{
+	unsigned int i = 0;
+
+	while (i < meta->nheld) {
+		struct ife_stats_buf *buf = meta->held[i].buf;
+		u64 t = meta->held[i].ts;
+		bool ok = t + VFE_DUAL_MATCH_NS > ts && t < ts + VFE_DUAL_MATCH_NS;
+
+		if (t + VFE_DUAL_MATCH_NS > ts && !ok) {
+			i++;
+			continue;
+		}
+		meta->nheld--;
+		memmove(&meta->held[i], &meta->held[i + 1],
+			(meta->nheld - i) * sizeof(meta->held[0]));
+		vb2_buffer_done(&buf->vb.vb2_buf, ok ? VB2_BUF_STATE_DONE : VB2_BUF_STATE_ERROR);
+	}
+}
+
+/* Master's lock held: end the pairing, give waiting buffers back to the queue */
+static void ife_dual_end(struct vfe_pix_meta *meta)
+{
+	while (meta->nheld)
+		list_add(&meta->held[--meta->nheld].buf->queue, &meta->stats_queue);
+	if (meta->dual_slave)
+		meta->dual_slave->dual_master = NULL;
+	meta->dual_slave = NULL;
 }
 
 /* Take the next queued stats buffer as the write target; lock held */
@@ -486,14 +560,46 @@ void vfe17x_meta_start(struct vfe_device *vfe, u32 width, u32 height)
 	meta->width = width;
 	meta->height = height;
 	meta->frame = 0;
+	meta->stripe_x = 0;
+	meta->stripe_w = width;
+	meta->frame_x = 0;
+	meta->slave_stats_off = 0;
+	meta->slave_stats_ts = 0;
+	meta->nheld = 0;
+	meta->dual_slave = NULL;
+	meta->dual_master = NULL;
+
+	/*
+	 * Dual IFE master (the slave started first): the master's grid and
+	 * parameters cover the left stripe up to its output width, the slave's
+	 * the right stripe from its crop.
+	 */
+	if (vfe->dual.master && vfe->dual.peer && vfe->dual.peer->pix_meta) {
+		struct vfe_pix_meta *slave = vfe->dual.peer->pix_meta;
+		const struct v4l2_rect *sc = &vfe->dual.peer->line[VFE_LINE_PIX].crop;
+
+		meta->stripe_w = vfe->dual.x_offset;
+		slave->stripe_x = sc->left;
+		slave->stripe_w = sc->width;
+		slave->frame_x = vfe->dual.x_offset - sc->left;
+		if (slave->frame_x % IFE17X_PDPC_MASK_ROWS)
+			dev_warn(vfe->camss->dev,
+				 "VFE%d: dual stripe at column %u: PDPC tiles not aligned\n",
+				 vfe->dual.peer->id, slave->frame_x);
+		slave->dual_master = meta;
+		meta->dual_slave = slave;
+	}
 	/* The default setup filled every gamma bank and selected bank 0 */
 	meta->gamma_bank = 0;
 	/* The VFE was reset: the mask bank must be written again */
 	meta->pdpc_mask_valid = false;
 	writel_relaxed(CAMIF_EPOCH_CFG, vfe->base + VFE_CAMIF_EPOCH_IRQ);
 
-	if (meta->awb_bg_pending)
+	if (meta->awb_bg_pending) {
 		ife_awb_bg_program(meta, &meta->awb_bg);
+		if (meta->dual_slave)
+			ife_awb_bg_program(meta->dual_slave, &meta->awb_bg);
+	}
 	ife_params_apply_next(meta, 0);
 	ife_stats_wm_init(meta);
 	meta->running = true;
@@ -504,6 +610,7 @@ void vfe17x_meta_start(struct vfe_device *vfe, u32 width, u32 height)
 void vfe17x_meta_stop(struct vfe_device *vfe)
 {
 	struct vfe_pix_meta *meta = vfe->pix_meta;
+	struct vfe_pix_meta *master;
 	unsigned long flags;
 
 	if (!meta)
@@ -516,7 +623,18 @@ void vfe17x_meta_stop(struct vfe_device *vfe)
 		list_add(&meta->stats_cur->queue, &meta->stats_queue);
 		meta->stats_cur = NULL;
 	}
+	ife_dual_end(meta);
 	spin_unlock_irqrestore(&meta->lock, flags);
+
+	/* Dual IFE slave: leave the master's pairing */
+	master = READ_ONCE(meta->dual_master);
+	if (master) {
+		spin_lock_irqsave(&master->lock, flags);
+		if (master->dual_slave == meta)
+			ife_dual_end(master);
+		meta->dual_master = NULL;
+		spin_unlock_irqrestore(&master->lock, flags);
+	}
 }
 
 /*
@@ -572,10 +690,25 @@ void vfe17x_meta_sequence(struct vfe_device *vfe, u32 *sequence)
 void vfe17x_meta_bus(struct vfe_device *vfe, u32 bus_status1)
 {
 	struct vfe_pix_meta *meta = vfe->pix_meta;
+	struct vfe_pix_meta *master;
 	struct ife_stats_buf *done;
 
 	if (!meta || !(bus_status1 & BIT(VFE_WM_AWB_BG)))
 		return;
+
+	/* Dual IFE slave: its grid went into the master's buffer */
+	master = READ_ONCE(meta->dual_master);
+	if (master) {
+		spin_lock(&master->lock);
+		if (master->dual_slave == meta) {
+			u64 ts = ktime_get_ns();
+
+			master->slave_stats_ts = ts;
+			ife_stats_dual_collect(master, ts);
+		}
+		spin_unlock(&master->lock);
+		return;
+	}
 
 	spin_lock(&meta->lock);
 	if (!meta->running) {
@@ -584,6 +717,25 @@ void vfe17x_meta_bus(struct vfe_device *vfe, u32 bus_status1)
 	}
 	done = meta->stats_cur;
 	ife_stats_next(meta);
+	/* Dual IFE: wait for the slave's grid of the same frame */
+	if (done && meta->dual_slave &&
+	    meta->slave_stats_ts + VFE_DUAL_MATCH_NS <= ktime_get_ns()) {
+		if (meta->nheld == ARRAY_SIZE(meta->held)) {
+			struct ife_stats_buf *old = meta->held[0].buf;
+
+			meta->nheld--;
+			memmove(&meta->held[0], &meta->held[1],
+				meta->nheld * sizeof(meta->held[0]));
+			vb2_buffer_done(&old->vb.vb2_buf, VB2_BUF_STATE_ERROR);
+		}
+		done->vb.sequence = meta->frame ? meta->frame - 1 : 0;
+		done->vb.vb2_buf.timestamp = ktime_get_ns();
+		vb2_set_plane_payload(&done->vb.vb2_buf, 0, IFE_STATS_SIZE);
+		meta->held[meta->nheld].buf = done;
+		meta->held[meta->nheld].ts = done->vb.vb2_buf.timestamp;
+		meta->nheld++;
+		done = NULL;
+	}
 	if (done) {
 		/*
 		 * The grid of frame k completes at its end, after the epoch of

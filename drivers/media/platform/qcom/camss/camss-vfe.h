@@ -154,6 +154,28 @@ struct vfe_subdev_resources {
 	const struct camss_formats *formats_pix_out;
 };
 
+/*
+ * Two pixel paths writing the halves of one frame wider than an IFE line:
+ * the master owns the buffers of its video node, the slave writes its stripe
+ * at x_offset into them. Protected by the master's output_lock, and on the
+ * slave also by its own.
+ */
+#define VFE_DUAL_HELD 4
+/* The two stripes of a frame complete within this time of each other */
+#define VFE_DUAL_MATCH_NS (8 * NSEC_PER_MSEC)
+
+struct vfe_pix_dual {
+	struct vfe_device *peer;
+	bool master;
+	u32 x_offset;		/* master: byte offset of the slave stripe */
+	u64 slave_ts;		/* master: when the slave last wrote a stripe */
+	unsigned int nheld;	/* master: buffers waiting for the slave */
+	struct {
+		struct camss_buffer *buf;
+		u64 ts;
+	} held[VFE_DUAL_HELD];
+};
+
 struct vfe_device {
 	struct camss *camss;
 	u8 id;
@@ -174,6 +196,7 @@ struct vfe_device {
 	struct vfe_line line[VFE_LINE_NUM_MAX];
 	u32 reg_update;
 	struct vfe_pix_meta *pix_meta;
+	struct vfe_pix_dual dual;
 	u8 was_streaming;
 	const struct vfe_subdev_resources *res;
 	const struct vfe_hw_ops_gen1 *ops_gen1;

@@ -515,6 +515,10 @@ static void vfe_reg_update(struct vfe_device *vfe, enum vfe_line_id line_id)
 
 	writel_relaxed(vfe->reg_update, vfe->base + VFE_REG_UPDATE_CMD);
 
+	/* Dual IFE: the slave latches together with the master */
+	if (line_id == VFE_LINE_PIX && vfe->dual.master && vfe->dual.peer)
+		writel_relaxed(REG_UPDATE_PIX, vfe->dual.peer->base + VFE_REG_UPDATE_CMD);
+
 	/* Enforce ordering between reg update and subsequent reg writes */
 	wmb();
 }
@@ -804,6 +808,120 @@ static void vfe_pix_wm_update(struct vfe_device *vfe, u32 addr,
 	writel_relaxed(addr, vfe->base + VFE_BUS_WM_IMAGE_ADDR(VFE_WM_PIX_FULL_Y));
 	writel_relaxed(addr + stride * pix->height,
 		       vfe->base + VFE_BUS_WM_IMAGE_ADDR(VFE_WM_PIX_FULL_C));
+
+	/* Dual IFE: the slave writes its stripe into the same buffer */
+	if (vfe->dual.master && vfe->dual.peer) {
+		void __iomem *s = vfe->dual.peer->base;
+		u32 off = vfe->dual.x_offset;
+
+		writel_relaxed(addr + off, s + VFE_BUS_WM_IMAGE_ADDR(VFE_WM_PIX_FULL_Y));
+		writel_relaxed(addr + stride * pix->height + off,
+			       s + VFE_BUS_WM_IMAGE_ADDR(VFE_WM_PIX_FULL_C));
+	}
+}
+
+/*
+ * Dual IFE: a pixel line whose output is also linked to the video node of
+ * another VFE's pixel line writes its stripe into that node's buffers.
+ */
+static struct vfe_line *vfe_pix_dual_master(struct vfe_line *line)
+{
+	struct media_entity *entity = &line->subdev.entity;
+	struct media_link *link;
+
+	for_each_media_entity_data_link(entity, link) {
+		struct media_entity *sink = link->sink->entity;
+		struct camss_video *video;
+
+		if (link->source->entity != entity ||
+		    !(link->flags & MEDIA_LNK_FL_ENABLED) ||
+		    !is_media_entity_v4l2_video_device(sink))
+			continue;
+		video = container_of(media_entity_to_video_device(sink),
+				     struct camss_video, vdev);
+		if (video != &line->video_out)
+			return container_of(video, struct vfe_line, video_out);
+	}
+
+	return NULL;
+}
+
+/*
+ * Master's output_lock held, the slave wrote a stripe at @ts: the held buffer
+ * of that frame is complete, older ones lack the slave's stripe (it dropped
+ * the frame). Pairing by time keeps the frames matched after a drop on
+ * either side.
+ */
+static unsigned int vfe_pix_dual_collect(struct vfe_pix_dual *d, u64 ts,
+					 struct camss_buffer **done, bool *error)
+{
+	unsigned int i = 0, n = 0;
+
+	while (i < d->nheld) {
+		u64 t = d->held[i].ts;
+
+		if (t + VFE_DUAL_MATCH_NS > ts) {
+			if (t < ts + VFE_DUAL_MATCH_NS) {
+				error[n] = false;
+				done[n++] = d->held[i].buf;
+			} else {
+				i++;
+				continue;
+			}
+		} else {
+			error[n] = true;
+			done[n++] = d->held[i].buf;
+		}
+		memmove(&d->held[i], &d->held[i + 1], (--d->nheld - i) * sizeof(d->held[0]));
+	}
+
+	return n;
+}
+
+/* Master's output_lock held: end the pairing, return what was waiting */
+static unsigned int vfe_pix_dual_end(struct vfe_device *master,
+				     struct camss_buffer **done)
+{
+	struct vfe_pix_dual *d = &master->dual;
+	unsigned int i, n = d->nheld;
+
+	for (i = 0; i < n; i++)
+		done[i] = d->held[i].buf;
+	memset(d, 0, sizeof(*d));
+
+	return n;
+}
+
+/* The slave wrote its stripe of a frame */
+static void vfe_pix_dual_slave_done(struct vfe_device *vfe)
+{
+	struct camss_buffer *done[VFE_DUAL_HELD];
+	bool error[VFE_DUAL_HELD];
+	struct vfe_device *master;
+	unsigned long flags;
+	unsigned int i, n = 0;
+	u64 ts = ktime_get_ns();
+
+	spin_lock_irqsave(&vfe->output_lock, flags);
+	master = vfe->dual.peer;
+	if (master) {
+		spin_lock_nested(&master->output_lock, SINGLE_DEPTH_NESTING);
+		if (master->dual.peer == vfe) {
+			master->dual.slave_ts = ts;
+			n = vfe_pix_dual_collect(&master->dual, ts, done, error);
+		}
+		spin_unlock(&master->output_lock);
+	}
+	spin_unlock_irqrestore(&vfe->output_lock, flags);
+
+	for (i = 0; i < n; i++) {
+		if (error[i])
+			dev_dbg_ratelimited(vfe->camss->dev,
+					    "VFE%d: no stripe for frame %u\n", vfe->id,
+					    done[i]->vb.sequence);
+		vb2_buffer_done(&done[i]->vb.vb2_buf,
+				error[i] ? VB2_BUF_STATE_ERROR : VB2_BUF_STATE_DONE);
+	}
 }
 
 static int vfe_pix_configure(struct vfe_device *vfe, struct vfe_line *line)
@@ -816,6 +934,11 @@ static int vfe_pix_configure(struct vfe_device *vfe, struct vfe_line *line)
 	u32 stride = pix->plane_fmt[0].bytesperline;
 	bool crcb = src->code == MEDIA_BUS_FMT_YVYU8_1_5X8;
 	int pattern;
+
+	/* Dual IFE slave: the buffers are those of the master's video node */
+	if (vfe->dual.peer && !vfe->dual.master)
+		stride = vfe->dual.peer->line[VFE_LINE_PIX].video_out.active_fmt.fmt.pix_mp
+				.plane_fmt[0].bytesperline;
 
 	pattern = vfe_pix_bayer_pattern(sink->code);
 	if (pattern < 0) {
@@ -863,6 +986,7 @@ static int vfe_pix_enable_output(struct vfe_line *line)
 {
 	struct vfe_device *vfe = to_vfe(line);
 	struct vfe_output *output = &line->output;
+	struct vfe_line *mline;
 	unsigned long flags;
 	unsigned int i;
 	int ret;
@@ -879,6 +1003,34 @@ static int vfe_pix_enable_output(struct vfe_line *line)
 	}
 
 	WARN_ON(output->gen2.active_num);
+
+	/*
+	 * Dual IFE slave: pair with the master before configuring, and leave
+	 * the write masters off: the master gives them its buffers.
+	 */
+	mline = vfe_pix_dual_master(line);
+	if (mline) {
+		struct vfe_device *mvfe = to_vfe(mline);
+
+		memset(&vfe->dual, 0, sizeof(vfe->dual));
+		vfe->dual.peer = mvfe;
+		spin_lock_nested(&mvfe->output_lock, SINGLE_DEPTH_NESTING);
+		memset(&mvfe->dual, 0, sizeof(mvfe->dual));
+		mvfe->dual.peer = vfe;
+		mvfe->dual.master = true;
+		mvfe->dual.x_offset = mline->crop.width;
+		spin_unlock(&mvfe->output_lock);
+
+		ret = vfe_pix_configure(vfe, line);
+		if (ret < 0)
+			goto out_unlock;
+		output->state = VFE_OUTPUT_ON;
+		output->sequence = 0;
+		vfe_reg_update(vfe, line->id);
+		dev_dbg(vfe->camss->dev, "VFE%d: pixel path stripe of VFE%d at %u\n",
+			vfe->id, mvfe->id, mvfe->dual.x_offset);
+		goto out_unlock;
+	}
 
 	ret = vfe_pix_configure(vfe, line);
 	if (ret < 0)
@@ -898,6 +1050,8 @@ static int vfe_pix_enable_output(struct vfe_line *line)
 	}
 
 	vfe_pix_wm_enable(vfe);
+	if (vfe->dual.master && vfe->dual.peer)
+		vfe_pix_wm_enable(vfe->dual.peer);
 
 	/* Latch the pipeline configuration and the first buffers */
 	vfe_reg_update(vfe, line->id);
@@ -1202,11 +1356,19 @@ static void vfe_isr_reg_update(struct vfe_device *vfe, enum vfe_line_id line_id)
 static void vfe_isr_wm_done(struct vfe_device *vfe, u8 wm)
 {
 	struct vfe_line *line = &vfe->line[vfe->wm_output_map[wm]];
-	struct camss_buffer *ready_buf;
+	struct camss_buffer *ready_buf, *done[VFE_DUAL_HELD + 1];
+	bool error[VFE_DUAL_HELD + 1] = { };
 	struct vfe_output *output;
 	unsigned long flags;
+	unsigned int i, ndone = 0;
+	bool dual;
 	u32 index;
 	u64 ts = ktime_get_ns();
+
+	if (vfe->wm_output_map[wm] == VFE_LINE_PIX && vfe->dual.peer && !vfe->dual.master) {
+		vfe_pix_dual_slave_done(vfe);
+		return;
+	}
 
 	spin_lock_irqsave(&vfe->output_lock, flags);
 
@@ -1216,6 +1378,8 @@ static void vfe_isr_wm_done(struct vfe_device *vfe, u8 wm)
 		goto out_unlock;
 	}
 	output = &vfe->line[vfe->wm_output_map[wm]].output;
+
+	dual = line->id == VFE_LINE_PIX && vfe->dual.master && vfe->dual.peer;
 
 	ready_buf = output->buf[0];
 	if (!ready_buf) {
@@ -1246,12 +1410,42 @@ static void vfe_isr_wm_done(struct vfe_device *vfe, u8 wm)
 		if (vfe_line_has_pix_pipeline(vfe, line->id))
 			vfe_reg_update(vfe, line->id);
 	} else {
+		/*
+		 * The write masters take one queued address per frame and skip
+		 * the frames they have none for, without a done interrupt.
+		 */
 		output->gen2.active_num--;
+	}
+
+	/*
+	 * Dual IFE master: the buffer is done once the slave wrote its stripe
+	 * of the same frame, which completes within VFE_DUAL_MATCH_NS.
+	 */
+	if (dual) {
+		struct vfe_pix_dual *d = &vfe->dual;
+
+		if (d->slave_ts + VFE_DUAL_MATCH_NS > ts) {
+			done[ndone++] = ready_buf;
+		} else {
+			if (d->nheld == VFE_DUAL_HELD) {
+				error[ndone] = true;
+				done[ndone++] = d->held[0].buf;
+				memmove(&d->held[0], &d->held[1],
+					--d->nheld * sizeof(d->held[0]));
+			}
+			d->held[d->nheld].buf = ready_buf;
+			d->held[d->nheld].ts = ts;
+			d->nheld++;
+		}
+	} else {
+		done[ndone++] = ready_buf;
 	}
 
 	spin_unlock_irqrestore(&vfe->output_lock, flags);
 
-	vb2_buffer_done(&ready_buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
+	for (i = 0; i < ndone; i++)
+		vb2_buffer_done(&done[i]->vb.vb2_buf,
+				error[i] ? VB2_BUF_STATE_ERROR : VB2_BUF_STATE_DONE);
 
 	return;
 
@@ -1283,9 +1477,35 @@ static void vfe_subdev_init(struct device *dev, struct vfe_device *vfe)
 static int vfe17x_disable(struct vfe_line *line)
 {
 	struct vfe_device *vfe = to_vfe(line);
+	struct camss_buffer *done[VFE_DUAL_HELD];
+	unsigned int i, n = 0;
+	unsigned long flags;
 
-	if (vfe_line_has_pix_pipeline(vfe, line->id))
+	if (vfe_line_has_pix_pipeline(vfe, line->id)) {
 		vfe17x_meta_stop(vfe);
+
+		/*
+		 * Dual IFE: end the pairing before this VFE stops or powers
+		 * off, so the master no longer writes the slave's registers.
+		 * Lock order slave, then master.
+		 */
+		spin_lock_irqsave(&vfe->output_lock, flags);
+		if (vfe->dual.master) {
+			n = vfe_pix_dual_end(vfe, done);
+		} else if (vfe->dual.peer) {
+			struct vfe_device *m = vfe->dual.peer;
+
+			spin_lock_nested(&m->output_lock, SINGLE_DEPTH_NESTING);
+			if (m->dual.peer == vfe)
+				n = vfe_pix_dual_end(m, done);
+			spin_unlock(&m->output_lock);
+			memset(&vfe->dual, 0, sizeof(vfe->dual));
+		}
+		spin_unlock_irqrestore(&vfe->output_lock, flags);
+
+		for (i = 0; i < n; i++)
+			vb2_buffer_done(&done[i]->vb.vb2_buf, VB2_BUF_STATE_ERROR);
+	}
 
 	return vfe_disable(line);
 }

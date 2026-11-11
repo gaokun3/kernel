@@ -208,17 +208,33 @@ static void video_buf_queue(struct vb2_buffer *vb)
 	video->ops->queue_buffer(video, buffer);
 }
 
+static struct v4l2_subdev *video_extra_source(struct camss_video *video, u32 *pad);
+
 static int video_check_format(struct camss_video *video)
 {
 	struct v4l2_pix_format_mplane *pix = &video->active_fmt.fmt.pix_mp;
 	struct v4l2_format format;
 	struct v4l2_pix_format_mplane *sd_pix = &format.fmt.pix_mp;
+	struct v4l2_subdev_format extra_fmt = { 0 };
+	struct v4l2_subdev *extra;
 	int ret;
 
 	sd_pix->pixelformat = pix->pixelformat;
 	ret = video_get_subdev_format(video, &format);
 	if (ret < 0)
 		return ret;
+
+	/* Dual IFE: the frame is the two stripes side by side */
+	extra = video_extra_source(video, &extra_fmt.pad);
+	if (extra) {
+		extra_fmt.which = V4L2_SUBDEV_FORMAT_ACTIVE;
+		ret = v4l2_subdev_call(extra, pad, get_fmt, NULL, &extra_fmt);
+		if (ret)
+			return ret;
+		if (extra_fmt.format.height != sd_pix->height)
+			return -EPIPE;
+		sd_pix->width += extra_fmt.format.width;
+	}
 
 	dev_dbg(video->camss->dev,
 		"%s: format is (%ux%u %p4cc/%up field:%u), trying (%ux%u %p4cc/%up field:%u)",
@@ -249,6 +265,47 @@ static int video_prepare_streaming(struct vb2_queue *q)
 	}
 
 	return ret;
+}
+
+/*
+ * A second pixel path linked to this video node (dual IFE): the subdev that
+ * writes the other stripe, or NULL.
+ */
+static struct v4l2_subdev *video_extra_source(struct camss_video *video, u32 *pad)
+{
+	struct media_pad *first = media_pad_remote_pad_first(&video->pad);
+	struct media_link *link;
+
+	for_each_media_entity_data_link(&video->vdev.entity, link) {
+		if (link->sink != &video->pad || !(link->flags & MEDIA_LNK_FL_ENABLED) ||
+		    link->source == first ||
+		    !is_media_entity_v4l2_subdev(link->source->entity))
+			continue;
+		if (pad)
+			*pad = link->source->index;
+		return media_entity_to_v4l2_subdev(link->source->entity);
+	}
+
+	return NULL;
+}
+
+/* Whether @entity is upstream of the video node through its first link */
+static bool video_chain_has(struct camss_video *video, struct media_entity *entity)
+{
+	struct media_entity *e = &video->vdev.entity;
+	struct media_pad *pad;
+
+	while (1) {
+		pad = &e->pads[0];
+		if (!(pad->flags & MEDIA_PAD_FL_SINK))
+			return false;
+		pad = media_pad_remote_pad_first(pad);
+		if (!pad || !is_media_entity_v4l2_subdev(pad->entity))
+			return false;
+		e = pad->entity;
+		if (e == entity)
+			return true;
+	}
 }
 
 /*
@@ -293,6 +350,26 @@ static int video_start_streaming(struct vb2_queue *q, unsigned int count)
 	ret = video_check_format(video);
 	if (ret < 0)
 		goto error;
+
+	/*
+	 * Dual IFE: start the other stripe's pixel path and CSID first, up to
+	 * what it shares with this chain, so that the CSIPHY and the sensor
+	 * start last and both CSIDs see the first frame.
+	 */
+	subdev = video_extra_source(video, NULL);
+	while (subdev) {
+		entity = &subdev->entity;
+		if (video_chain_has(video, entity) || subdev->s_stream_enabled)
+			break;
+		ret = v4l2_subdev_call(subdev, video, s_stream, 1);
+		if (ret < 0 && ret != -ENOIOCTLCMD)
+			goto error;
+		pad = media_pad_remote_pad_first(&entity->pads[0]);
+		if (!(entity->pads[0].flags & MEDIA_PAD_FL_SINK) || !pad ||
+		    !is_media_entity_v4l2_subdev(pad->entity))
+			break;
+		subdev = media_entity_to_v4l2_subdev(pad->entity);
+	}
 
 	entity = &vdev->entity;
 	while (1) {
@@ -361,6 +438,22 @@ static void video_stop_streaming(struct vb2_queue *q)
 			dev_err(video->camss->dev, "Video pipeline stop failed: %d\n", ret);
 			return;
 		}
+	}
+
+	/* Dual IFE: then the other stripe's chain, up to what still streams */
+	subdev = video_extra_source(video, NULL);
+	from = &vdev->entity;
+	while (subdev && subdev->s_stream_enabled) {
+		entity = &subdev->entity;
+		if (video_entity_shared(entity, from))
+			break;
+		v4l2_subdev_call(subdev, video, s_stream, 0);
+		pad = media_pad_remote_pad_first(&entity->pads[0]);
+		if (!(entity->pads[0].flags & MEDIA_PAD_FL_SINK) || !pad ||
+		    !is_media_entity_v4l2_subdev(pad->entity))
+			break;
+		from = entity;
+		subdev = media_entity_to_v4l2_subdev(pad->entity);
 	}
 
 	video_device_pipeline_stop(vdev);

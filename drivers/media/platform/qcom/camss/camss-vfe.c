@@ -2072,6 +2072,14 @@ static int vfe_link_setup(struct media_entity *entity,
 			  const struct media_pad *local,
 			  const struct media_pad *remote, u32 flags)
 {
+	/*
+	 * Dual IFE: besides its own video node, a pixel path output may feed
+	 * the video node of another pixel path.
+	 */
+	if ((local->flags & MEDIA_PAD_FL_SOURCE) &&
+	    is_media_entity_v4l2_video_device(remote->entity))
+		return 0;
+
 	if (flags & MEDIA_LNK_FL_ENABLED)
 		if (media_pad_remote_pad_first(local))
 			return -EBUSY;

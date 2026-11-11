@@ -5060,6 +5060,30 @@ static int camss_link_entities(struct camss *camss)
 						return ret;
 					}
 				}
+
+		/*
+		 * Pixel path to the video node of another pixel path: the two
+		 * write the halves of a frame wider than one IFE takes.
+		 */
+		for (i = 0; i < camss->res->vfe_num; i++)
+			for (k = 0; k < camss->res->vfe_num; k++) {
+				struct vfe_device *a = &camss->vfe[i], *b = &camss->vfe[k];
+
+				if (i == k || !vfe_line_has_pix_pipeline(a, VFE_LINE_PIX) ||
+				    !vfe_line_has_pix_pipeline(b, VFE_LINE_PIX))
+					continue;
+				ret = media_create_pad_link(&a->line[VFE_LINE_PIX].subdev.entity,
+							    MSM_VFE_PAD_SRC,
+							    &b->line[VFE_LINE_PIX].video_out.vdev.entity,
+							    0, 0);
+				if (ret < 0) {
+					camss_link_err(camss,
+						       a->line[VFE_LINE_PIX].subdev.entity.name,
+						       b->line[VFE_LINE_PIX].video_out.vdev.name,
+						       ret);
+					return ret;
+				}
+			}
 	}
 
 	return 0;

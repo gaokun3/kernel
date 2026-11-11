@@ -757,6 +757,40 @@ static int csid_set_power(struct v4l2_subdev *sd, int on)
  *
  * Return 0 on success or a negative error code otherwise
  */
+/*
+ * Dual IFE: the CSIDs feeding the two pixel paths of a VFE pair start and
+ * stop on the same frame boundary, the one of the master VFE driving the
+ * other. The VFEs paired when the slave's pixel path started, before its
+ * CSID.
+ */
+static void csid_ipp_dual_role(struct csid_device *csid)
+{
+	struct media_pad *pad = media_pad_remote_pad_first(&csid->pads[MSM_CSID_PAD_IPP]);
+	struct csid_device *master;
+	struct vfe_device *vfe;
+	struct vfe_line *line;
+
+	csid->ipp_sync = CSID_IPP_SYNC_NONE;
+	if (!pad || !is_media_entity_v4l2_subdev(pad->entity))
+		return;
+
+	line = v4l2_get_subdevdata(media_entity_to_v4l2_subdev(pad->entity));
+	vfe = to_vfe(line);
+	if (!vfe->dual.peer)
+		return;
+	if (vfe->dual.master) {
+		csid->ipp_sync = CSID_IPP_SYNC_MASTER;
+		return;
+	}
+
+	pad = media_pad_remote_pad_first(&vfe->dual.peer->line[VFE_LINE_PIX].pads[MSM_VFE_PAD_SINK]);
+	if (!pad || !is_media_entity_v4l2_subdev(pad->entity))
+		return;
+	master = v4l2_get_subdevdata(media_entity_to_v4l2_subdev(pad->entity));
+	csid->ipp_master = master->id;
+	csid->ipp_sync = CSID_IPP_SYNC_SLAVE;
+}
+
 static int csid_set_stream(struct v4l2_subdev *sd, int enable)
 {
 	struct csid_device *csid = v4l2_get_subdevdata(sd);
@@ -776,6 +810,9 @@ static int csid_set_stream(struct v4l2_subdev *sd, int enable)
 		    !media_pad_remote_pad_first(&csid->pads[MSM_CSID_PAD_SINK]))
 			return -ENOLINK;
 	}
+
+	if (enable && csid->res->has_ipp)
+		csid_ipp_dual_role(csid);
 
 	if (csid->phy.need_vc_update) {
 		csid->res->hw_ops->configure_stream(csid, enable);

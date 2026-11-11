@@ -355,6 +355,11 @@ static bool csid_port_is_ipp(struct csid_device *csid, u8 port)
 	return csid->res->has_ipp && port == CSID_PORT_IPP;
 }
 
+/* IPP halt modes and master index, downstream cam_ife_csid_core.c for 175 */
+#define		IPP_CTRL_HALT_MODE_MASTER	2
+#define		IPP_CTRL_HALT_MODE_SLAVE	3
+#define		IPP_CTRL_MASTER_IDX		4
+
 static void __csid_ctrl_ipp(struct csid_device *csid, int enable)
 {
 	u32 val;
@@ -363,6 +368,22 @@ static void __csid_ctrl_ipp(struct csid_device *csid, int enable)
 		val = HALT_CMD_RESUME_AT_FRAME_BOUNDARY << RDI_CTRL_HALT_CMD;
 	else
 		val = HALT_CMD_HALT_AT_FRAME_BOUNDARY << RDI_CTRL_HALT_CMD;
+
+	/*
+	 * Dual IFE: the slave follows the master's resume and halt, so the
+	 * two stripes start and stop on the same frame.
+	 */
+	switch (csid->ipp_sync) {
+	case CSID_IPP_SYNC_MASTER:
+		val |= IPP_CTRL_HALT_MODE_MASTER << RDI_CTRL_HALT_MODE;
+		break;
+	case CSID_IPP_SYNC_SLAVE:
+		val = IPP_CTRL_HALT_MODE_SLAVE << RDI_CTRL_HALT_MODE |
+		      csid->ipp_master << IPP_CTRL_MASTER_IDX;
+		break;
+	default:
+		break;
+	}
 	writel_relaxed(val, csid->base + CSID_IPP_CTRL);
 }
 

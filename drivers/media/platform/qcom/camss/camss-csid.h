@@ -170,6 +170,9 @@ struct csid_device {
 	struct v4l2_mbus_framefmt fmt[MSM_CSID_PADS_NUM];
 	/* Crop of the IPP output within the sink format (active format only) */
 	struct v4l2_rect ipp_crop;
+	/* Dual IFE: this IPP starts and stops with the one of another CSID */
+	enum { CSID_IPP_SYNC_NONE, CSID_IPP_SYNC_MASTER, CSID_IPP_SYNC_SLAVE } ipp_sync;
+	u8 ipp_master;		/* slave: the master CSID */
 	struct v4l2_ctrl_handler ctrls;
 	struct v4l2_ctrl *testgen_mode;
 	const struct csid_subdev_resources *res;
