@@ -310,8 +310,10 @@ static bool video_chain_has(struct camss_video *video, struct media_entity *enti
 
 /*
  * Video nodes can share the subdevs upstream of a VFE line: the pixel path and
- * an RDI fed by the same CSID run from the same sensor stream. Whether another
- * enabled link leads from @entity to a streaming subdev other than @from.
+ * an RDI fed by the same CSID run from the same sensor stream, and the display
+ * output of a VFE takes its frames from the pixel path, whose own video node
+ * streams too. Whether another enabled link leads from @entity to a streaming
+ * subdev or video node other than @from.
  */
 static bool video_entity_shared(struct media_entity *entity,
 				struct media_entity *from)
@@ -322,11 +324,17 @@ static bool video_entity_shared(struct media_entity *entity,
 		struct media_entity *sink = link->sink->entity;
 
 		if (link->source->entity != entity ||
-		    !(link->flags & MEDIA_LNK_FL_ENABLED) || sink == from ||
-		    !is_media_entity_v4l2_subdev(sink))
+		    !(link->flags & MEDIA_LNK_FL_ENABLED) || sink == from)
 			continue;
-		if (media_entity_to_v4l2_subdev(sink)->s_stream_enabled)
+		if (is_media_entity_v4l2_subdev(sink) &&
+		    media_entity_to_v4l2_subdev(sink)->s_stream_enabled)
 			return true;
+		if (is_media_entity_v4l2_video_device(sink)) {
+			struct video_device *vdev = media_entity_to_video_device(sink);
+
+			if (vdev->queue && vb2_start_streaming_called(vdev->queue))
+				return true;
+		}
 	}
 
 	return false;
@@ -452,6 +460,7 @@ static void video_stop_streaming(struct vb2_queue *q)
 	struct media_pad *pad;
 	struct v4l2_subdev *subdev;
 	struct media_entity *from;
+	bool first = true;
 	int ret;
 
 	entity = &vdev->entity;
@@ -468,9 +477,24 @@ static void video_stop_streaming(struct vb2_queue *q)
 		entity = pad->entity;
 		subdev = media_entity_to_v4l2_subdev(entity);
 
-		/* Still feeding another streaming node: keep it and upstream */
-		if (video_entity_shared(entity, from))
+		/*
+		 * Stopped already by the node that started it (the pixel path
+		 * of a display output, by its own node): what streams upstream
+		 * streams for other nodes.
+		 */
+		if (!subdev->s_stream_enabled)
 			break;
+
+		/*
+		 * The subdev that feeds this node was started by it (see
+		 * video_start_streaming()) and stops with it, together with
+		 * what it feeds besides: the pixel path stops its display
+		 * output. Upstream, a subdev still feeding another streaming
+		 * node keeps running, and all upstream of it.
+		 */
+		if (!first && video_entity_shared(entity, from))
+			break;
+		first = false;
 
 		ret = v4l2_subdev_call(subdev, video, s_stream, 0);
 

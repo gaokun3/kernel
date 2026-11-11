@@ -78,7 +78,12 @@ struct vfe_output {
 	enum vfe_output_state state;
 	unsigned int sequence;
 	bool error;		/* the frame being written came in corrupt */
-	bool armed_next;	/* vfe-17x: a buffer waits for the next frame */
+	/*
+	 * vfe-17x: the next frame has a buffer of this output, and the one
+	 * after has one too (only from a stream start that armed two)
+	 */
+	bool armed_next;
+	bool armed_ahead;
 
 	int wait_reg_update;
 	struct completion sof;
@@ -122,14 +127,20 @@ struct vfe_hw_ops {
 	void (*vfe_buf_done)(struct vfe_device *vfe, int port_id);
 	void (*vfe_wm_update)(struct vfe_device *vfe, u8 wm, u32 addr,
 			      struct vfe_line *line);
-	/* Optional parameters and statistics nodes of the pixel pipeline */
+	/*
+	 * Optional nodes of the pixel pipeline besides its own output:
+	 * parameters, statistics, a second (display) output
+	 */
 	int (*meta_register)(struct vfe_device *vfe, struct v4l2_device *v4l2_dev);
 	void (*meta_unregister)(struct vfe_device *vfe);
 	/* Optional: the streams must restart, tell their queues */
 	void (*fatal_error)(struct vfe_device *vfe);
+	/* Optional: the pixel line's frame is corrupt, so is its display frame */
+	void (*pix_frame_error)(struct vfe_device *vfe);
 };
 
 struct vfe_pix_meta;
+struct vfe_pix_disp;
 
 struct vfe_isr_ops {
 	void (*reset_ack)(struct vfe_device *vfe);
@@ -211,6 +222,13 @@ struct vfe_device {
 	struct vfe_line line[VFE_LINE_NUM_MAX];
 	u32 reg_update;
 	struct vfe_pix_meta *pix_meta;
+	struct vfe_pix_disp *pix_disp;
+	/* vfe-17x: the outputs of the next frame once it is written, 0 before */
+	u32 pix_next_outputs;
+	/* vfe-17x: the RDI lines linked when the pixel path started, by line id */
+	u8 pix_rdi_linked;
+	/* vfe-17x: the pixel path is stopping, no display output may start */
+	bool pix_stopping;
 	struct vfe_pix_dual dual;
 	struct vfe_errors errors;
 	u8 was_streaming;

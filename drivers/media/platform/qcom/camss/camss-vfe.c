@@ -634,6 +634,7 @@ int vfe_enable_output_v2(struct vfe_line *line)
 
 	output->state = VFE_OUTPUT_ON;
 	output->armed_next = false;
+	output->armed_ahead = false;
 	output->error = false;
 
 	output->sequence = 0;
@@ -1299,7 +1300,8 @@ void vfe_line_fatal_error(struct vfe_line *line)
  *
  * Its buffer completes with VB2_BUF_STATE_ERROR; a dual IFE slave passes
  * it on to the master's buffer with its stripe. Called in interrupt context,
- * by the VFE and by the CSID feeding it.
+ * by the VFE and by the CSID feeding it. The pixel line's frame is also the
+ * frame of its display output.
  */
 void vfe_line_frame_error(struct vfe_line *line)
 {
@@ -1310,7 +1312,11 @@ void vfe_line_frame_error(struct vfe_line *line)
 	if (line->output.state == VFE_OUTPUT_ON)
 		line->output.error = true;
 	spin_unlock_irqrestore(&vfe->output_lock, flags);
+
+	if (line->id == VFE_LINE_PIX && vfe->res->hw_ops->pix_frame_error)
+		vfe->res->hw_ops->pix_frame_error(vfe);
 }
+
 /*
  * vfe_flush_buffers - Return all vb2 buffers
  * @vid: Video device structure
@@ -2121,11 +2127,11 @@ static int vfe_link_setup(struct media_entity *entity,
 			  const struct media_pad *remote, u32 flags)
 {
 	/*
-	 * Dual IFE: besides its own video node, a pixel path output may feed
-	 * the video node of another pixel path.
+	 * Besides its own video node, a pixel path output may feed the video
+	 * node of another pixel path (dual IFE) and the display output of its
+	 * VFE.
 	 */
-	if ((local->flags & MEDIA_PAD_FL_SOURCE) &&
-	    is_media_entity_v4l2_video_device(remote->entity))
+	if (local->flags & MEDIA_PAD_FL_SOURCE)
 		return 0;
 
 	if (flags & MEDIA_LNK_FL_ENABLED)

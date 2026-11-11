@@ -34,6 +34,8 @@
  * @IFE17X_PARAMS_BLOCK_ABF: adaptive Bayer filter (ABF34)
  * @IFE17X_PARAMS_BLOCK_BPC: bad pixel and bad cluster correction (BPCBCC50)
  * @IFE17X_PARAMS_BLOCK_LSC: lens shading correction (LSC34)
+ * @IFE17X_PARAMS_BLOCK_OUTPUTS: the outputs that write the frame
+ * @IFE17X_PARAMS_BLOCK_DISPLAY_WINDOW: the display output's window of the frame
  */
 enum ife17x_params_block_type {
 	IFE17X_PARAMS_BLOCK_BLS,
@@ -46,6 +48,8 @@ enum ife17x_params_block_type {
 	IFE17X_PARAMS_BLOCK_ABF,
 	IFE17X_PARAMS_BLOCK_BPC,
 	IFE17X_PARAMS_BLOCK_LSC,
+	IFE17X_PARAMS_BLOCK_OUTPUTS,
+	IFE17X_PARAMS_BLOCK_DISPLAY_WINDOW,
 };
 
 /**
@@ -447,6 +451,62 @@ struct ife17x_params_lsc {
 	__u32 reserved;
 } __attribute__((aligned(8)));
 
+#define IFE17X_OUTPUT_FULL		(1U << 0)
+#define IFE17X_OUTPUT_DISPLAY		(1U << 1)
+#define IFE17X_OUTPUT_RDI		(1U << 2)
+
+/**
+ * struct ife17x_params_outputs - the outputs that write the frame
+ * @header: block header, type IFE17X_PARAMS_BLOCK_OUTPUTS
+ * @outputs: IFE17X_OUTPUT_* flags, at least IFE17X_OUTPUT_FULL or
+ *	     IFE17X_OUTPUT_DISPLAY
+ * @reserved: must be zero
+ *
+ * The frame these parameters apply to is written once every output named has
+ * a buffer for it, and only those get one, so a request can leave out the
+ * full output or the RDI. Outputs not linked when the pixel path started are
+ * left out of the list. Without the block the full output decides, with the
+ * display output when its link is on, and the RDI lines follow.
+ * V4L2_ISP_PARAMS_FL_BLOCK_DISABLE means no block.
+ */
+struct ife17x_params_outputs {
+	struct v4l2_isp_params_block_header header;
+	__u32 outputs;
+	__u32 reserved;
+} __attribute__((aligned(8)));
+
+/**
+ * struct ife17x_params_display_window - the display output's window of the
+ * frame
+ * @header: block header, type IFE17X_PARAMS_BLOCK_DISPLAY_WINDOW
+ * @compose_width: width of the whole frame scaled, as the display subdev's
+ *		   sink compose rectangle (with dual IFE the whole frame of both
+ *		   stripes)
+ * @compose_height: height of the whole frame scaled, likewise
+ * @crop_left: left edge of the display output in the scaled frame; its size
+ *	       is that of the display subdev's source crop rectangle, which
+ *	       does not change while streaming
+ * @crop_top: top edge of the display output in the scaled frame
+ * @reserved: must be zero
+ *
+ * The window holds from the frame these parameters apply to until another
+ * block changes it; at stream start it is the display subdev's compose and
+ * crop rectangles. A window the driver cannot take (a compose rectangle
+ * outside the scaler limits: larger than the sink or more than 16 times
+ * smaller; odd values; the crop not inside the compose rectangle) makes the
+ * buffer invalid when the driver can tell as it is queued, and is ignored
+ * otherwise: the frame keeps the previous window.
+ * V4L2_ISP_PARAMS_FL_BLOCK_DISABLE means no block.
+ */
+struct ife17x_params_display_window {
+	struct v4l2_isp_params_block_header header;
+	__u16 compose_width;
+	__u16 compose_height;
+	__u16 crop_left;
+	__u16 crop_top;
+	__u32 reserved[2];
+} __attribute__((aligned(8)));
+
 #define IFE17X_PARAMS_MAX_SIZE					\
 	(sizeof(struct ife17x_params_bls) +			\
 	 sizeof(struct ife17x_params_wb) +			\
@@ -457,7 +517,9 @@ struct ife17x_params_lsc {
 	 sizeof(struct ife17x_params_bf) +			\
 	 sizeof(struct ife17x_params_abf) +			\
 	 sizeof(struct ife17x_params_bpc) +			\
-	 sizeof(struct ife17x_params_lsc))
+	 sizeof(struct ife17x_params_lsc) +			\
+	 sizeof(struct ife17x_params_outputs) +			\
+	 sizeof(struct ife17x_params_display_window))
 
 /**
  * struct ife17x_awb_bg_region - AWB Bayer grid record, as the hardware

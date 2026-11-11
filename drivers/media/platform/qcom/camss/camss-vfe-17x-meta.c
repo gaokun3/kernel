@@ -31,6 +31,7 @@
 
 #include "camss.h"
 #include "camss-vfe.h"
+#include "camss-vfe-17x-disp.h"
 #include "camss-vfe-17x-meta.h"
 
 /* Module enables, double buffered */
@@ -207,6 +208,11 @@ struct ife_params_buf {
 	struct vb2_v4l2_buffer vb;
 	struct list_head queue;
 	struct v4l2_isp_params_buffer *config;
+	/* The outputs that write its frame (IFE17X_OUTPUT_*), 0 without the block */
+	u32 outputs;
+	/* The display output's window from its frame on, if it sets one */
+	bool window_set;
+	struct ife17x_params_display_window window;
 };
 
 struct ife_stats_buf {
@@ -271,6 +277,14 @@ struct vfe_pix_meta {
 	u32 width;
 	u32 height;
 	u32 frame;		/* epochs since the stream start */
+	/*
+	 * Frames are numbered from the first one the image path writes, as
+	 * userspace expects of a stream: frame seq_base is frame 0. Frames
+	 * before it (the display output not on yet) are not the stream's and
+	 * have no frame start event. seq_based: that frame is known.
+	 */
+	u32 seq_base;
+	bool seq_based;
 	u64 epoch_ns;		/* time of the last epoch 0 */
 	u64 period_ns;		/* between the last two epochs 0 */
 	u8 gamma_bank;		/* LUT banks in use: 0 even, 1 odd */
@@ -351,6 +365,8 @@ union ife_params_block {
 	const struct ife17x_params_abf *abf;
 	const struct ife17x_params_bpc *bpc;
 	const struct ife17x_params_lsc *lsc;
+	const struct ife17x_params_outputs *outputs;
+	const struct ife17x_params_display_window *window;
 	const u8 *data;
 };
 
@@ -918,6 +934,16 @@ static void ife_params_lsc(struct vfe_pix_meta *meta, union ife_params_block blo
 	vfe_rmw(vfe, VFE_MODULE_LENS_EN, 0, LENS_EN_LSC);
 }
 
+/* The outputs decide the frame's buffers (vfe17x_meta_next_outputs_locked()) */
+static void ife_params_outputs(struct vfe_pix_meta *meta, union ife_params_block block)
+{
+}
+
+/* Set with the frame's buffers too (vfe17x_meta_next_window_locked()) */
+static void ife_params_display_window(struct vfe_pix_meta *meta, union ife_params_block block)
+{
+}
+
 static const ife_params_handler ife_params_handlers[] = {
 	[IFE17X_PARAMS_BLOCK_BLS] = ife_params_bls,
 	[IFE17X_PARAMS_BLOCK_WB] = ife_params_wb,
@@ -929,6 +955,8 @@ static const ife_params_handler ife_params_handlers[] = {
 	[IFE17X_PARAMS_BLOCK_ABF] = ife_params_abf,
 	[IFE17X_PARAMS_BLOCK_BPC] = ife_params_bpc,
 	[IFE17X_PARAMS_BLOCK_LSC] = ife_params_lsc,
+	[IFE17X_PARAMS_BLOCK_OUTPUTS] = ife_params_outputs,
+	[IFE17X_PARAMS_BLOCK_DISPLAY_WINDOW] = ife_params_display_window,
 };
 
 static const struct v4l2_isp_params_block_type_info ife_params_block_types[] = {
@@ -942,9 +970,31 @@ static const struct v4l2_isp_params_block_type_info ife_params_block_types[] = {
 	[IFE17X_PARAMS_BLOCK_ABF] = { .size = sizeof(struct ife17x_params_abf) },
 	[IFE17X_PARAMS_BLOCK_BPC] = { .size = sizeof(struct ife17x_params_bpc) },
 	[IFE17X_PARAMS_BLOCK_LSC] = { .size = sizeof(struct ife17x_params_lsc) },
+	[IFE17X_PARAMS_BLOCK_OUTPUTS] = { .size = sizeof(struct ife17x_params_outputs) },
+	[IFE17X_PARAMS_BLOCK_DISPLAY_WINDOW] = {
+		.size = sizeof(struct ife17x_params_display_window)
+	},
 };
 
 static_assert(ARRAY_SIZE(ife_params_handlers) == ARRAY_SIZE(ife_params_block_types));
+
+/*
+ * The frame number of the epoch count @frame (struct vfe_pix_meta): 0 for the
+ * first frame written. Lock held.
+ */
+static u32 ife_seq(const struct vfe_pix_meta *meta, u32 frame)
+{
+	return meta->seq_based && frame >= meta->seq_base ? frame - meta->seq_base : 0;
+}
+
+/* The next frame, @meta->frame, is the first one written. Lock held. */
+static void ife_seq_first_written(struct vfe_pix_meta *meta)
+{
+	if (!meta->seq_based) {
+		meta->seq_base = meta->frame;
+		meta->seq_based = true;
+	}
+}
 
 /* Apply the next queued parameters buffer; called with the lock held */
 static bool ife_params_apply_next(struct vfe_pix_meta *meta, u32 sequence)
@@ -1144,7 +1194,7 @@ static void ife_stats_return(struct vfe_pix_meta *meta)
 	meta->next_set = false;
 }
 
-static void ife_stats_wm_init(struct vfe_pix_meta *meta)
+static void ife_stats_wm_init(struct vfe_pix_meta *meta, bool written)
 {
 	static const u8 wms[] = { VFE_WM_BF, VFE_WM_AWB_BG };
 	struct vfe_device *vfe = meta->vfe;
@@ -1165,7 +1215,7 @@ static void ife_stats_wm_init(struct vfe_pix_meta *meta)
 	/* Frame 0 */
 	meta->next_set = false;
 	meta->next_got = 0;
-	ife_stats_settle(meta, true);
+	ife_stats_settle(meta, written);
 	meta->stats_cur = meta->stats_next;
 	meta->cur_wms = meta->next_wms;
 	meta->cur_got = 0;
@@ -1181,9 +1231,11 @@ static void ife_stats_wm_init(struct vfe_pix_meta *meta)
 
 /*
  * Stream start, from vfe_pix_configure() with the output lock held and
- * interrupts off, before the first register update.
+ * interrupts off, before the first register update. @written: the image path
+ * writes frame 0, which then takes the first parameters and statistics
+ * buffers; otherwise they wait for the first frame it writes.
  */
-void vfe17x_meta_start(struct vfe_device *vfe, u32 width, u32 height)
+void vfe17x_meta_start(struct vfe_device *vfe, u32 width, u32 height, bool written)
 {
 	struct vfe_pix_meta *meta = vfe->pix_meta;
 
@@ -1194,8 +1246,10 @@ void vfe17x_meta_start(struct vfe_device *vfe, u32 width, u32 height)
 	meta->width = width;
 	meta->height = height;
 	meta->frame = 0;
+	meta->seq_base = 0;
+	meta->seq_based = written;
 	meta->wedged = false;
-	meta->next_written = true;
+	meta->next_written = written;
 	meta->join_open = false;
 	meta->stripe_x = 0;
 	meta->stripe_w = width;
@@ -1244,8 +1298,9 @@ void vfe17x_meta_start(struct vfe_device *vfe, u32 width, u32 height)
 		if (meta->dual_slave)
 			ife_awb_bg_program(meta->dual_slave, &meta->awb_bg);
 	}
-	ife_params_apply_next(meta, 0);
-	ife_stats_wm_init(meta);
+	if (written)
+		ife_params_apply_next(meta, 0);
+	ife_stats_wm_init(meta, written);
 	meta->running = true;
 	spin_unlock(&meta->lock);
 }
@@ -1381,8 +1436,44 @@ bool vfe17x_meta_join_open_locked(struct vfe_device *vfe)
 }
 
 /*
- * The image path got a buffer for the next frame after epoch 0, before epoch
- * 1 of the current frame: the next frame belongs to a request after all.
+ * The outputs the parameters buffer the next frame written takes names
+ * (struct ife17x_params_outputs), 0 without the block or without a buffer.
+ * Lock held (vfe17x_meta_lock()).
+ */
+u32 vfe17x_meta_next_outputs_locked(struct vfe_device *vfe)
+{
+	struct vfe_pix_meta *meta = vfe->pix_meta;
+	struct ife_params_buf *buf;
+
+	if (!meta)
+		return 0;
+
+	buf = list_first_entry_or_null(&meta->params_queue, struct ife_params_buf, queue);
+
+	return buf ? buf->outputs : 0;
+}
+
+/*
+ * The display window the parameters buffer the next frame written takes sets
+ * (struct ife17x_params_display_window), or NULL. Lock held.
+ */
+const struct ife17x_params_display_window *
+vfe17x_meta_next_window_locked(struct vfe_device *vfe)
+{
+	struct vfe_pix_meta *meta = vfe->pix_meta;
+	struct ife_params_buf *buf;
+
+	if (!meta)
+		return NULL;
+
+	buf = list_first_entry_or_null(&meta->params_queue, struct ife_params_buf, queue);
+
+	return buf && buf->window_set ? &buf->window : NULL;
+}
+
+/*
+ * The outputs the next frame needs got their buffers after epoch 0, before
+ * epoch 1 of the current frame: the next frame belongs to a request after all.
  * Apply its parameters and queue its statistics buffer now, before the next
  * frame starts. Returns true if registers need a PIX register update.
  */
@@ -1395,7 +1486,8 @@ bool vfe17x_meta_join_locked(struct vfe_device *vfe)
 		return false;
 
 	meta->next_written = true;
-	applied = ife_params_apply_next(meta, meta->frame);
+	ife_seq_first_written(meta);
+	applied = ife_params_apply_next(meta, ife_seq(meta, meta->frame));
 	ife_stats_settle(meta, true);
 	return applied;
 }
@@ -1415,7 +1507,7 @@ bool vfe17x_meta_epoch(struct vfe_device *vfe, bool next_written)
 		return false;
 
 	struct v4l2_event ev = { .type = V4L2_EVENT_FRAME_SYNC };
-	bool running;
+	bool running, event = false;
 
 	spin_lock(&meta->lock);
 	running = meta->running;
@@ -1449,7 +1541,8 @@ bool vfe17x_meta_epoch(struct vfe_device *vfe, bool next_written)
 		meta->next_set = false;
 	}
 	if (running) {
-		ev.u.frame_sync.frame_sequence = meta->frame;
+		u32 frame = meta->frame;
+
 		{
 			u64 now = ktime_get_ns();
 
@@ -1461,15 +1554,19 @@ bool vfe17x_meta_epoch(struct vfe_device *vfe, bool next_written)
 		meta->next_written = next_written;
 		meta->join_open = true;
 		if (next_written) {
-			applied = ife_params_apply_next(meta, meta->frame);
+			ife_seq_first_written(meta);
+			applied = ife_params_apply_next(meta, ife_seq(meta, meta->frame));
 			if (!meta->dual_master)
 				ife_stats_settle(meta, true);
 		}
+		/* Not before the first frame written: not one of the stream */
+		event = meta->seq_based && frame >= meta->seq_base;
+		ev.u.frame_sync.frame_sequence = ife_seq(meta, frame);
 	}
 	spin_unlock(&meta->lock);
 
 	/* Frame start for the sensor control timing in userspace */
-	if (running)
+	if (event)
 		v4l2_event_queue(vfe->line[VFE_LINE_PIX].subdev.devnode, &ev);
 
 	return applied;
@@ -1552,7 +1649,7 @@ void vfe17x_meta_sequence(struct vfe_device *vfe, u32 *sequence)
 
 	spin_lock_irqsave(&meta->lock, flags);
 	if (meta->running && meta->frame)
-		*sequence = meta->frame - 1;
+		*sequence = ife_seq(meta, meta->frame - 1);
 	spin_unlock_irqrestore(&meta->lock, flags);
 }
 
@@ -1617,7 +1714,7 @@ void vfe17x_meta_bus(struct vfe_device *vfe, u32 bus_status1)
 		 * and k + 1: number them from the epochs, so they match the
 		 * image even if they were turned on after the stream start.
 		 */
-		done->vb.sequence = meta->frame - 1;
+		done->vb.sequence = ife_seq(meta, meta->frame - 1);
 		done->vb.vb2_buf.timestamp = ktime_get_ns();
 		ife_stats_finish(meta, done, true);
 	}
@@ -1901,7 +1998,34 @@ invalid:
 	return -EINVAL;
 }
 
-static int ife_params_check(struct device *dev, union ife_params_block block)
+/*
+ * A display window: even values and the smallest compose rectangle always;
+ * the rest against the display subdev's sink and crop size once they are
+ * fixed, while it streams. Else vfe17x_disp_next_window() checks it.
+ */
+static bool ife_display_window_valid(struct vfe_pix_meta *meta,
+				     const struct ife17x_params_display_window *w)
+{
+	struct vfe_pix_disp *disp = meta->vfe->pix_disp;
+	struct v4l2_rect compose = { 0, 0, w->compose_width, w->compose_height };
+	struct v4l2_rect crop;
+
+	if (w->reserved[0] || w->reserved[1] ||
+	    (w->compose_width | w->compose_height | w->crop_left |
+			    w->crop_top) & 1 ||
+	    w->compose_width < VFE_DISP_MIN_WIDTH || w->compose_height < VFE_DISP_MIN_HEIGHT)
+		return false;
+	if (!disp || !READ_ONCE(disp->subdev.s_stream_enabled))
+		return true;
+
+	crop = (struct v4l2_rect){ w->crop_left, w->crop_top, disp->crop.width,
+				   disp->crop.height };
+
+	return vfe17x_disp_window_valid(&disp->fmt[MSM_VFE_PAD_SINK], &compose, &crop);
+}
+
+static int ife_params_check(struct vfe_pix_meta *meta, struct device *dev,
+			    union ife_params_block block)
 {
 	unsigned int i, j;
 
@@ -1971,6 +2095,17 @@ static int ife_params_check(struct device *dev, union ife_params_block block)
 		return ife_abf_check(dev, block.abf);
 	case IFE17X_PARAMS_BLOCK_LSC:
 		return ife_lsc_check(dev, block.lsc);
+	case IFE17X_PARAMS_BLOCK_DISPLAY_WINDOW:
+		if (!ife_display_window_valid(meta, block.window))
+			goto invalid;
+		break;
+	case IFE17X_PARAMS_BLOCK_OUTPUTS:
+		if (block.outputs->outputs & ~(IFE17X_OUTPUT_FULL | IFE17X_OUTPUT_DISPLAY |
+					       IFE17X_OUTPUT_RDI) ||
+		    !(block.outputs->outputs & (IFE17X_OUTPUT_FULL | IFE17X_OUTPUT_DISPLAY)) ||
+		    block.outputs->reserved)
+			goto invalid;
+		break;
 	case IFE17X_PARAMS_BLOCK_BPC:
 		for (i = 0; i < 4; i++)
 			if (block.bpc->wb_ratio[i] > 0x1ffff)
@@ -2013,13 +2148,21 @@ static int ife_params_buf_prepare(struct vb2_buffer *vb)
 		return ret;
 
 	/* The values of the enabled blocks; a disabled one may be a bare header */
+	buf->outputs = 0;
+	buf->window_set = false;
 	while (off < buf->config->data_size) {
 		union ife_params_block block = { .data = &buf->config->data[off] };
 
 		if (!ife_block_disabled(block)) {
-			ret = ife_params_check(dev, block);
+			ret = ife_params_check(meta, dev, block);
 			if (ret)
 				return ret;
+			if (block.header->type == IFE17X_PARAMS_BLOCK_OUTPUTS)
+				buf->outputs = block.outputs->outputs;
+			if (block.header->type == IFE17X_PARAMS_BLOCK_DISPLAY_WINDOW) {
+				buf->window = *block.window;
+				buf->window_set = true;
+			}
 		}
 		off += block.header->size;
 	}
@@ -2036,6 +2179,11 @@ static void ife_params_buf_queue(struct vb2_buffer *vb)
 	/* Before the stream starts the frame size is unknown: keep the grid */
 	if (!meta->running)
 		ife_params_scan_awb(meta, buf->config);
+	/*
+	 * Its outputs decide the next frame it is first in the queue for. A
+	 * frame not yet written does not join now even if its image buffers
+	 * are all there: it waits for the next epoch 0.
+	 */
 	list_add_tail(&buf->queue, &meta->params_queue);
 	spin_unlock_irqrestore(&meta->lock, flags);
 }
