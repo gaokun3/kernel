@@ -270,6 +270,22 @@ properties:
     description:
       1.2V supply to CSIPHY IP blocks.
 
+  vdd-csiphy01-0p88-supply:
+    description:
+      0.88V supply to CSIPHY0 and CSIPHY1.
+
+  vdd-csiphy01-1p2-supply:
+    description:
+      1.2V supply to CSIPHY0 and CSIPHY1.
+
+  vdd-csiphy23-0p88-supply:
+    description:
+      0.88V supply to CSIPHY2 and CSIPHY3.
+
+  vdd-csiphy23-1p2-supply:
+    description:
+      1.2V supply to CSIPHY2 and CSIPHY3.
+
 required:
   - clock-names
   - clocks
