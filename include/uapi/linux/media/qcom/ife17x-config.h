@@ -33,6 +33,7 @@
  * @IFE17X_PARAMS_BLOCK_BF: focus statistics (BFStats23)
  * @IFE17X_PARAMS_BLOCK_ABF: adaptive Bayer filter (ABF34)
  * @IFE17X_PARAMS_BLOCK_BPC: bad pixel and bad cluster correction (BPCBCC50)
+ * @IFE17X_PARAMS_BLOCK_LSC: lens shading correction (LSC34)
  */
 enum ife17x_params_block_type {
 	IFE17X_PARAMS_BLOCK_BLS,
@@ -44,6 +45,7 @@ enum ife17x_params_block_type {
 	IFE17X_PARAMS_BLOCK_BF,
 	IFE17X_PARAMS_BLOCK_ABF,
 	IFE17X_PARAMS_BLOCK_BPC,
+	IFE17X_PARAMS_BLOCK_LSC,
 };
 
 /**
@@ -399,6 +401,52 @@ struct ife17x_params_bpc {
 	__u32 reserved;
 } __attribute__((aligned(8)));
 
+/* At most 16 x 12 blocks: 17 x 13 nodes */
+#define IFE17X_LSC_MAX_H_BLOCKS		16
+#define IFE17X_LSC_MAX_V_BLOCKS		12
+#define IFE17X_LSC_MAX_NODES		221
+
+/**
+ * struct ife17x_params_lsc - lens shading correction
+ * @header: block header, type IFE17X_PARAMS_BLOCK_LSC
+ * @gain: gains of the red, green on red rows, green on blue rows and blue
+ *	  pixels at the grid nodes, row by row from the top left, unsigned Q10
+ *	  from 1024 to 8191; (h_blocks + 1) * (v_blocks + 1) nodes are used
+ * @h_blocks: blocks across the grid, 1 to 16
+ * @v_blocks: blocks down the grid, 1 to 12
+ * @subgrid_shift: each block holds 2^subgrid_shift x 2^subgrid_shift
+ *		   subgrids, 0..3
+ * @reserved0: must be zero
+ * @block_width: block width in Bayer quads (2 x 2 pixels), 18..2048, a
+ *		 multiple of 2^subgrid_shift whose subgrids are 9 quads or
+ *		 wider
+ * @block_height: block height in quads, 9..1024, likewise with subgrids of 9
+ *		  quads or more
+ * @start_x: quads from the grid's left edge to the frame's first column
+ * @start_y: quads from the grid's top edge to the frame's first row
+ * @reserved: must be zero
+ *
+ * The grid covers the frame, in the units of the IFE input. The layout comes
+ * from the Windows driver; the hardware behaviour is not verified. The
+ * driver loads the gains into the inactive LUT banks and switches banks with
+ * the next register update. With two IFEs, both take the frame's grid and the
+ * driver starts the right one at its first column.
+ * V4L2_ISP_PARAMS_FL_BLOCK_DISABLE bypasses the block.
+ */
+struct ife17x_params_lsc {
+	struct v4l2_isp_params_block_header header;
+	__u16 gain[4][IFE17X_LSC_MAX_NODES];
+	__u8 h_blocks;
+	__u8 v_blocks;
+	__u8 subgrid_shift;
+	__u8 reserved0;
+	__u16 block_width;
+	__u16 block_height;
+	__u16 start_x;
+	__u16 start_y;
+	__u32 reserved;
+} __attribute__((aligned(8)));
+
 #define IFE17X_PARAMS_MAX_SIZE					\
 	(sizeof(struct ife17x_params_bls) +			\
 	 sizeof(struct ife17x_params_wb) +			\
@@ -408,7 +456,8 @@ struct ife17x_params_bpc {
 	 sizeof(struct ife17x_params_pdpc) +			\
 	 sizeof(struct ife17x_params_bf) +			\
 	 sizeof(struct ife17x_params_abf) +			\
-	 sizeof(struct ife17x_params_bpc))
+	 sizeof(struct ife17x_params_bpc) +			\
+	 sizeof(struct ife17x_params_lsc))
 
 /**
  * struct ife17x_awb_bg_region - AWB Bayer grid record, as the hardware
