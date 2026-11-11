@@ -36,6 +36,7 @@
  * @IFE17X_PARAMS_BLOCK_LSC: lens shading correction (LSC34)
  * @IFE17X_PARAMS_BLOCK_OUTPUTS: the outputs that write the frame
  * @IFE17X_PARAMS_BLOCK_DISPLAY_WINDOW: the display output's window of the frame
+ * @IFE17X_PARAMS_BLOCK_BHIST: Bayer histogram statistics (BHistStats14)
  */
 enum ife17x_params_block_type {
 	IFE17X_PARAMS_BLOCK_BLS,
@@ -50,6 +51,7 @@ enum ife17x_params_block_type {
 	IFE17X_PARAMS_BLOCK_LSC,
 	IFE17X_PARAMS_BLOCK_OUTPUTS,
 	IFE17X_PARAMS_BLOCK_DISPLAY_WINDOW,
+	IFE17X_PARAMS_BLOCK_BHIST,
 };
 
 /**
@@ -507,6 +509,53 @@ struct ife17x_params_display_window {
 	__u32 reserved[2];
 } __attribute__((aligned(8)));
 
+#define IFE17X_BHIST_BINS		1024
+
+#define IFE17X_BHIST_CHANNEL_Y		0
+#define IFE17X_BHIST_CHANNEL_R		1
+#define IFE17X_BHIST_CHANNEL_GR		2
+#define IFE17X_BHIST_CHANNEL_GB		3
+#define IFE17X_BHIST_CHANNEL_B		4
+
+/**
+ * struct ife17x_params_bhist - Bayer histogram statistics configuration
+ * @header: block header, type IFE17X_PARAMS_BLOCK_BHIST
+ * @channel: the channel counted, IFE17X_BHIST_CHANNEL_*
+ * @reserved0: must be zero
+ * @left: left edge of the window, in frame pixels (with two IFEs the frame of
+ *	  both stripes), even
+ * @top: top edge of the window, even
+ * @width: width of the window, even, at least 2
+ * @height: height of the window, even, at least 2
+ * @reserved: must be zero
+ *
+ * The histogram counts the pixels of the channel inside the window into
+ * IFE17X_BHIST_BINS bins of equal width over the 14 bit range: per 2 by 2
+ * pixel block one count, of its pixel of the channel or, for the Y channel,
+ * of its luminance before the white balance gains. The window is clamped to
+ * the frame, and stretched down to end at least an eighth of the frame down. The statistics
+ * are taken at the same place as the AWB grid's, after the black level
+ * subtraction. V4L2_ISP_PARAMS_FL_BLOCK_DISABLE stops them.
+ *
+ * With two IFEs each IFE counts the part of the window in its stripe: the
+ * left one into bhist[0], the right one into bhist[1] (struct
+ * ife17x_stats_buffer). The left stripe ends and the right one starts at the
+ * column the right stripe's output starts from. An IFE whose stripe the
+ * window misses, by less than 2 columns of it once the edges are made even,
+ * counts a 2 by 2 pixel window in the last rows of its stripe, which the
+ * histogram of the window does not include.
+ */
+struct ife17x_params_bhist {
+	struct v4l2_isp_params_block_header header;
+	__u16 channel;
+	__u16 reserved0;
+	__u16 left;
+	__u16 top;
+	__u16 width;
+	__u16 height;
+	__u32 reserved;
+} __attribute__((aligned(8)));
+
 #define IFE17X_PARAMS_MAX_SIZE					\
 	(sizeof(struct ife17x_params_bls) +			\
 	 sizeof(struct ife17x_params_wb) +			\
@@ -519,7 +568,8 @@ struct ife17x_params_display_window {
 	 sizeof(struct ife17x_params_bpc) +			\
 	 sizeof(struct ife17x_params_lsc) +			\
 	 sizeof(struct ife17x_params_outputs) +			\
-	 sizeof(struct ife17x_params_display_window))
+	 sizeof(struct ife17x_params_display_window) +		\
+	 sizeof(struct ife17x_params_bhist))
 
 /**
  * struct ife17x_awb_bg_region - AWB Bayer grid record, as the hardware
@@ -555,6 +605,9 @@ struct ife17x_bf_record {
  *	two IFEs the left stripe's records start at bf[0] and the right
  *	stripe's at bf[IFE17X_BF_DUAL_RIGHT]: the header the right stripe
  *	writes before its records ends bf[IFE17X_BF_DUAL_RIGHT - 1]
+ * @bhist: Bayer histogram, counts in bits [24:0] of each bin (struct
+ *	   ife17x_params_bhist); bhist[1] only with two IFEs, for the right
+ *	   stripe; undefined without the histogram
  *
  * The buffer sequence number is the frame sequence number of the image the
  * statistics describe.
@@ -563,6 +616,7 @@ struct ife17x_stats_buffer {
 	struct ife17x_awb_bg_region awb_bg[IFE17X_AWB_BG_MAX_H * IFE17X_AWB_BG_MAX_V];
 	__u64 bf_header;
 	struct ife17x_bf_record bf[IFE17X_BF_MAX_ROIS];
+	__u32 bhist[2][IFE17X_BHIST_BINS] __attribute__((aligned(64)));
 };
 
 #endif /* __UAPI_QCOM_IFE17X_CONFIG_H */
