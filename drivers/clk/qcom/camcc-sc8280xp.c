@@ -68,6 +68,7 @@ static struct alpha_pll_config camcc_pll0_config = {
 
 static struct clk_alpha_pll camcc_pll0 = {
 	.offset = 0x0,
+	.config = &camcc_pll0_config,
 	.vco_table = lucid_vco,
 	.num_vco = ARRAY_SIZE(lucid_vco),
 	.regs = clk_alpha_pll_regs[CLK_ALPHA_PLL_TYPE_LUCID],
@@ -143,6 +144,7 @@ static struct alpha_pll_config camcc_pll1_config = {
 
 static struct clk_alpha_pll camcc_pll1 = {
 	.offset = 0x1000,
+	.config = &camcc_pll1_config,
 	.vco_table = lucid_vco,
 	.num_vco = ARRAY_SIZE(lucid_vco),
 	.regs = clk_alpha_pll_regs[CLK_ALPHA_PLL_TYPE_LUCID],
@@ -190,6 +192,7 @@ static struct alpha_pll_config camcc_pll2_config = {
 
 static struct clk_alpha_pll camcc_pll2 = {
 	.offset = 0x2000,
+	.config = &camcc_pll2_config,
 	.vco_table = zonda_vco,
 	.num_vco = ARRAY_SIZE(zonda_vco),
 	.regs = clk_alpha_pll_regs[CLK_ALPHA_PLL_TYPE_ZONDA],
@@ -221,6 +224,7 @@ static struct alpha_pll_config camcc_pll3_config = {
 
 static struct clk_alpha_pll camcc_pll3 = {
 	.offset = 0x3000,
+	.config = &camcc_pll3_config,
 	.vco_table = lucid_vco,
 	.num_vco = ARRAY_SIZE(lucid_vco),
 	.regs = clk_alpha_pll_regs[CLK_ALPHA_PLL_TYPE_LUCID],
@@ -274,6 +278,7 @@ static struct alpha_pll_config camcc_pll4_config = {
 
 static struct clk_alpha_pll camcc_pll4 = {
 	.offset = 0x4000,
+	.config = &camcc_pll4_config,
 	.vco_table = lucid_vco,
 	.num_vco = ARRAY_SIZE(lucid_vco),
 	.regs = clk_alpha_pll_regs[CLK_ALPHA_PLL_TYPE_LUCID],
@@ -327,6 +332,7 @@ static struct alpha_pll_config camcc_pll5_config = {
 
 static struct clk_alpha_pll camcc_pll5 = {
 	.offset = 0x10000,
+	.config = &camcc_pll5_config,
 	.vco_table = lucid_vco,
 	.num_vco = ARRAY_SIZE(lucid_vco),
 	.regs = clk_alpha_pll_regs[CLK_ALPHA_PLL_TYPE_LUCID],
@@ -380,6 +386,7 @@ static struct alpha_pll_config camcc_pll6_config = {
 
 static struct clk_alpha_pll camcc_pll6 = {
 	.offset = 0x11000,
+	.config = &camcc_pll6_config,
 	.vco_table = lucid_vco,
 	.num_vco = ARRAY_SIZE(lucid_vco),
 	.regs = clk_alpha_pll_regs[CLK_ALPHA_PLL_TYPE_LUCID],
@@ -433,6 +440,7 @@ static struct alpha_pll_config camcc_pll7_config = {
 
 static struct clk_alpha_pll camcc_pll7 = {
 	.offset = 0x12000,
+	.config = &camcc_pll7_config,
 	.vco_table = lucid_vco,
 	.num_vco = ARRAY_SIZE(lucid_vco),
 	.regs = clk_alpha_pll_regs[CLK_ALPHA_PLL_TYPE_LUCID],
@@ -2991,6 +2999,28 @@ static const struct regmap_config camcc_sc8280xp_regmap_config = {
 	.fast_io = true,
 };
 
+static struct clk_alpha_pll *camcc_sc8280xp_plls[] = {
+	&camcc_pll0,
+	&camcc_pll1,
+	&camcc_pll2,
+	&camcc_pll3,
+	&camcc_pll4,
+	&camcc_pll5,
+	&camcc_pll6,
+	&camcc_pll7,
+};
+
+static const u32 camcc_sc8280xp_critical_cbcrs[] = {
+	0xc1e4, /* CAMCC_GDSC_CLK */
+};
+
+static const struct qcom_cc_driver_data camcc_sc8280xp_driver_data = {
+	.alpha_plls = camcc_sc8280xp_plls,
+	.num_alpha_plls = ARRAY_SIZE(camcc_sc8280xp_plls),
+	.clk_cbcrs = camcc_sc8280xp_critical_cbcrs,
+	.num_clk_cbcrs = ARRAY_SIZE(camcc_sc8280xp_critical_cbcrs),
+};
+
 static const struct qcom_cc_desc camcc_sc8280xp_desc = {
 	.config = &camcc_sc8280xp_regmap_config,
 	.clks = camcc_sc8280xp_clocks,
@@ -2999,6 +3029,8 @@ static const struct qcom_cc_desc camcc_sc8280xp_desc = {
 	.num_resets = ARRAY_SIZE(camcc_sc8280xp_resets),
 	.gdscs = camcc_sc8280xp_gdscs,
 	.num_gdscs = ARRAY_SIZE(camcc_sc8280xp_gdscs),
+	.use_rpm = true,
+	.driver_data = &camcc_sc8280xp_driver_data,
 };
 
 static const struct of_device_id camcc_sc8280xp_match_table[] = {
@@ -3009,49 +3041,11 @@ MODULE_DEVICE_TABLE(of, camcc_sc8280xp_match_table);
 
 static int camcc_sc8280xp_probe(struct platform_device *pdev)
 {
-	struct regmap *regmap;
-	int ret;
-
-	ret = devm_pm_runtime_enable(&pdev->dev);
-	if (ret)
-		return ret;
-
-	ret = pm_runtime_resume_and_get(&pdev->dev);
-	if (ret)
-		return ret;
-
-	regmap = qcom_cc_map(pdev, &camcc_sc8280xp_desc);
-	if (IS_ERR(regmap)) {
-		ret = PTR_ERR(regmap);
-		goto err_put_rpm;
-	}
-
-	clk_lucid_pll_configure(&camcc_pll0, regmap, &camcc_pll0_config);
-	clk_lucid_pll_configure(&camcc_pll1, regmap, &camcc_pll1_config);
-	clk_zonda_pll_configure(&camcc_pll2, regmap, &camcc_pll2_config);
-	clk_lucid_pll_configure(&camcc_pll3, regmap, &camcc_pll3_config);
-	clk_lucid_pll_configure(&camcc_pll4, regmap, &camcc_pll4_config);
-	clk_lucid_pll_configure(&camcc_pll5, regmap, &camcc_pll5_config);
-	clk_lucid_pll_configure(&camcc_pll6, regmap, &camcc_pll6_config);
-	clk_lucid_pll_configure(&camcc_pll7, regmap, &camcc_pll7_config);
-
-	/* Keep some clocks always-on */
-	qcom_branch_set_clk_en(regmap, 0xc1e4); /* CAMCC_GDSC_CLK */
-
-	ret = qcom_cc_really_probe(&pdev->dev, &camcc_sc8280xp_desc, regmap);
-	if (ret)
-		goto err_disable;
-
-	pm_runtime_put(&pdev->dev);
-
-	return 0;
-
-err_disable:
-	regmap_update_bits(regmap, 0xc1e4, BIT(0), 0);
-err_put_rpm:
-	pm_runtime_put_sync(&pdev->dev);
-
-	return ret;
+	/*
+	 * The common probe attaches the power domains, MMCX and MX, before it
+	 * resumes the device and configures the PLLs.
+	 */
+	return qcom_cc_probe(pdev, &camcc_sc8280xp_desc);
 }
 
 static struct platform_driver camcc_sc8280xp_driver = {

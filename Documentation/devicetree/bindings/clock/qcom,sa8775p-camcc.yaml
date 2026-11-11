@@ -34,13 +34,16 @@ properties:
       - description: Sleep clock source
 
   power-domains:
-    maxItems: 1
-    description: MMCX power domain
+    minItems: 1
+    items:
+      - description: MMCX power domain
+      - description: MX power domain, for the PLLs
 
   required-opps:
-    description:
-      OPP node describing required MMCX performance point.
-    maxItems: 1
+    minItems: 1
+    items:
+      - description: MMCX performance point
+      - description: MX performance point
 
 required:
   - compatible
