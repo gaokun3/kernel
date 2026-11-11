@@ -36,6 +36,7 @@
 /* Module enables, double buffered */
 #define VFE_MODULE_LENS_EN		0x040
 #define		LENS_EN_BLS		BIT(11)
+#define		LENS_EN_PDPC		BIT(13)
 #define VFE_MODULE_STATS_EN		0x044
 #define		STATS_EN_AWB_BG		BIT(3)
 #define VFE_MODULE_COLOR_EN		0x048
@@ -67,6 +68,17 @@
 #define VFE_DMI_ADDR			0xc28
 #define VFE_DMI_DATA_LO			0xc30
 #define GAMMA_ENTRIES			64
+
+/* PDPC11, from the Windows driver (Titan17x CreateCmdList and PackIQ) */
+#define VFE_PDPC_CFG			0xcb4	/* [0] on, [1] HDR, [19:8] black */
+#define VFE_PDPC_HDR_RATIO		0xcb8	/* [8:0] 1/ratio Q8, [30:16] ratio Q10 */
+#define VFE_PDPC_T2_OFFSET		0xcbc	/* [14:0] red/blue, [30:16] green */
+#define VFE_PDPC_LIMITS			0xcc0	/* [7:0] fmax, [15:8] fmin */
+#define VFE_PDPC_OFFSET			0xcc4	/* [14:0] red/blue, [30:16] green */
+#define VFE_PDPC_WB_RATIO(n)		(0xcc8 + 4 * (n))
+#define VFE_PDPC_TILE_OFFSET		0xcd8	/* [13:0] x, [29:16] y */
+#define VFE_PDPC_END			0xcdc	/* [13:0] x, [29:16] y */
+#define VFE_PDPC_DMI_BANK		0x0b
 
 #define VFE_STATS_CFG			0xaac
 #define		STATS_CFG_FIXED		BIT(6)
@@ -139,6 +151,8 @@ struct vfe_pix_meta {
 	u8 gamma_bank;		/* LUT banks in use: 0 even, 1 odd */
 	bool awb_bg_pending;	/* AWB block seen before the stream start */
 	struct ife17x_params_awb_bg awb_bg;
+	bool pdpc_mask_valid;	/* the PDPC mask bank holds pdpc_mask */
+	u32 pdpc_mask[IFE17X_PDPC_MASK_ROWS];
 };
 
 static inline struct ife_params_buf *to_params_buf(struct vb2_v4l2_buffer *vbuf)
@@ -168,6 +182,7 @@ union ife_params_block {
 	const struct ife17x_params_ccm *ccm;
 	const struct ife17x_params_gamma *gamma;
 	const struct ife17x_params_awb_bg *awb_bg;
+	const struct ife17x_params_pdpc *pdpc;
 	const u8 *data;
 };
 
@@ -269,6 +284,49 @@ static void ife_params_gamma(struct vfe_pix_meta *meta, union ife_params_block b
 	vfe_rmw(vfe, VFE_MODULE_COLOR_EN, 0, COLOR_EN_GAMMA);
 }
 
+static void ife_params_pdpc(struct vfe_pix_meta *meta, union ife_params_block block)
+{
+	const struct ife17x_params_pdpc *p = block.pdpc;
+	struct vfe_device *vfe = meta->vfe;
+	unsigned int i;
+
+	if (ife_block_disabled(block)) {
+		vfe_rmw(vfe, VFE_MODULE_LENS_EN, LENS_EN_PDPC, 0);
+		return;
+	}
+
+	/* One mask bank: rewrite it only when it changes */
+	if (!meta->pdpc_mask_valid || memcmp(meta->pdpc_mask, p->mask, sizeof(p->mask))) {
+		writel_relaxed(VFE_PDPC_DMI_BANK | DMI_CFG_AUTO_INC, vfe->base + VFE_DMI_CFG);
+		writel_relaxed(0, vfe->base + VFE_DMI_ADDR);
+		for (i = 0; i < IFE17X_PDPC_MASK_ROWS; i++)
+			writel_relaxed(p->mask[i], vfe->base + VFE_DMI_DATA_LO);
+		writel_relaxed(0, vfe->base + VFE_DMI_CFG);
+		memcpy(meta->pdpc_mask, p->mask, sizeof(p->mask));
+		meta->pdpc_mask_valid = true;
+	}
+
+	/* No HDR: exposure ratio 1.0 */
+	writel_relaxed(BIT(0) | min_t(u32, p->black_level, 0xfff) << 8,
+		       vfe->base + VFE_PDPC_CFG);
+	writel_relaxed(0x400 << 16 | 0x100, vfe->base + VFE_PDPC_HDR_RATIO);
+	writel_relaxed(min_t(u32, p->t2_bp_offset[1], 0x7fff) |
+		       min_t(u32, p->t2_bp_offset[0], 0x7fff) << 16,
+		       vfe->base + VFE_PDPC_T2_OFFSET);
+	writel_relaxed(p->fmax | p->fmin << 8, vfe->base + VFE_PDPC_LIMITS);
+	writel_relaxed(min_t(u32, p->bp_offset[1], 0x7fff) |
+		       min_t(u32, p->bp_offset[0], 0x7fff) << 16,
+		       vfe->base + VFE_PDPC_OFFSET);
+	for (i = 0; i < 4; i++)
+		writel_relaxed(min_t(u32, p->wb_ratio[i], 0x1ffff),
+			       vfe->base + VFE_PDPC_WB_RATIO(i));
+	/* The mask tile starts at the top left corner of the input */
+	writel_relaxed(0, vfe->base + VFE_PDPC_TILE_OFFSET);
+	writel_relaxed((meta->height - 1) << 16 | (meta->width - 1),
+		       vfe->base + VFE_PDPC_END);
+	vfe_rmw(vfe, VFE_MODULE_LENS_EN, 0, LENS_EN_PDPC);
+}
+
 static void ife_awb_bg_program(struct vfe_pix_meta *meta,
 			       const struct ife17x_params_awb_bg *cfg)
 {
@@ -309,6 +367,7 @@ static const ife_params_handler ife_params_handlers[] = {
 	[IFE17X_PARAMS_BLOCK_CCM] = ife_params_ccm,
 	[IFE17X_PARAMS_BLOCK_GAMMA] = ife_params_gamma,
 	[IFE17X_PARAMS_BLOCK_AWB_BG] = ife_params_awb_bg,
+	[IFE17X_PARAMS_BLOCK_PDPC] = ife_params_pdpc,
 };
 
 static const struct v4l2_isp_params_block_type_info ife_params_block_types[] = {
@@ -317,6 +376,7 @@ static const struct v4l2_isp_params_block_type_info ife_params_block_types[] = {
 	[IFE17X_PARAMS_BLOCK_CCM] = { .size = sizeof(struct ife17x_params_ccm) },
 	[IFE17X_PARAMS_BLOCK_GAMMA] = { .size = sizeof(struct ife17x_params_gamma) },
 	[IFE17X_PARAMS_BLOCK_AWB_BG] = { .size = sizeof(struct ife17x_params_awb_bg) },
+	[IFE17X_PARAMS_BLOCK_PDPC] = { .size = sizeof(struct ife17x_params_pdpc) },
 };
 
 static_assert(ARRAY_SIZE(ife_params_handlers) == ARRAY_SIZE(ife_params_block_types));
@@ -428,6 +488,8 @@ void vfe17x_meta_start(struct vfe_device *vfe, u32 width, u32 height)
 	meta->frame = 0;
 	/* The default setup filled every gamma bank and selected bank 0 */
 	meta->gamma_bank = 0;
+	/* The VFE was reset: the mask bank must be written again */
+	meta->pdpc_mask_valid = false;
 	writel_relaxed(CAMIF_EPOCH_CFG, vfe->base + VFE_CAMIF_EPOCH_IRQ);
 
 	if (meta->awb_bg_pending)

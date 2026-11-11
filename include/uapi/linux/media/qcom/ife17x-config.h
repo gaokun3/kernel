@@ -25,6 +25,7 @@
  * @IFE17X_PARAMS_BLOCK_CCM: colour correction matrix (CC12)
  * @IFE17X_PARAMS_BLOCK_GAMMA: gamma curves (Gamma16)
  * @IFE17X_PARAMS_BLOCK_AWB_BG: AWB Bayer grid statistics (AWBBGStats14)
+ * @IFE17X_PARAMS_BLOCK_PDPC: phase detection pixel correction (PDPC11)
  */
 enum ife17x_params_block_type {
 	IFE17X_PARAMS_BLOCK_BLS,
@@ -32,6 +33,7 @@ enum ife17x_params_block_type {
 	IFE17X_PARAMS_BLOCK_CCM,
 	IFE17X_PARAMS_BLOCK_GAMMA,
 	IFE17X_PARAMS_BLOCK_AWB_BG,
+	IFE17X_PARAMS_BLOCK_PDPC,
 };
 
 /**
@@ -128,12 +130,50 @@ struct ife17x_params_awb_bg {
 	__u32 reserved;
 } __attribute__((aligned(8)));
 
+#define IFE17X_PDPC_MASK_ROWS		64
+
+/**
+ * struct ife17x_params_pdpc - phase detection pixel correction
+ * @header: block header, type IFE17X_PARAMS_BLOCK_PDPC
+ * @black_level: black level of the input in the 14 bit pipeline units (a 10
+ *		 bit level of 64 is 1024), at most 4095
+ * @fmax: upper limit of a phase detection pixel against its neighbours,
+ *	  unsigned Q6
+ * @fmin: lower limit, unsigned Q6
+ * @bp_offset: offsets for the green [0] and the red and blue [1] pixels, at
+ *	       most 32767
+ * @t2_bp_offset: second offsets, same order, at most 32767
+ * @wb_ratio: white balance gain ratios R/G, B/G, G/R and G/B, unsigned Q12,
+ *	      at most 131071
+ * @mask: phase detection pixels of a 64x64 pixel tile repeated over the
+ *	  frame from its top left corner: bit (31 - x / 2) of row y marks the
+ *	  pixel pair at columns x & ~1 and x | 1 that holds one
+ * @reserved: must be zero
+ *
+ * Corrects the pixels the mask marks over the whole frame. The field meanings
+ * follow the calculation of the Windows driver; the tested values are those
+ * of its ov13b10 tuning: fmax 80, fmin 32, offsets 128.
+ * V4L2_ISP_PARAMS_FL_BLOCK_DISABLE bypasses the block.
+ */
+struct ife17x_params_pdpc {
+	struct v4l2_isp_params_block_header header;
+	__u16 black_level;
+	__u8 fmax;
+	__u8 fmin;
+	__u16 bp_offset[2];
+	__u16 t2_bp_offset[2];
+	__u32 wb_ratio[4];
+	__u32 mask[IFE17X_PDPC_MASK_ROWS];
+	__u32 reserved;
+} __attribute__((aligned(8)));
+
 #define IFE17X_PARAMS_MAX_SIZE					\
 	(sizeof(struct ife17x_params_bls) +			\
 	 sizeof(struct ife17x_params_wb) +			\
 	 sizeof(struct ife17x_params_ccm) +			\
 	 sizeof(struct ife17x_params_gamma) +			\
-	 sizeof(struct ife17x_params_awb_bg))
+	 sizeof(struct ife17x_params_awb_bg) +			\
+	 sizeof(struct ife17x_params_pdpc))
 
 /**
  * struct ife17x_awb_bg_region - AWB Bayer grid record, as the hardware
