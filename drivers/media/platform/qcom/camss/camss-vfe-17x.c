@@ -1048,6 +1048,7 @@ static int vfe_pix_enable_output(struct vfe_line *line)
 		if (ret < 0)
 			goto out_unlock;
 		output->state = VFE_OUTPUT_ON;
+		output->armed_next = false;
 		output->error = false;
 		output->sequence = 0;
 		vfe_reg_update(vfe, line->id);
@@ -1061,6 +1062,7 @@ static int vfe_pix_enable_output(struct vfe_line *line)
 		goto out_unlock;
 
 	output->state = VFE_OUTPUT_ON;
+	output->armed_next = false;
 	output->error = false;
 	output->sequence = 0;
 	output->wait_reg_update = 0;
@@ -1238,6 +1240,118 @@ static bool vfe_wm_is_pix(struct vfe_device *vfe, u8 wm)
 }
 
 /*
+ * Give a line the buffer of the next frame, if it has none yet. Output lock
+ * held.
+ */
+static bool vfe17x_arm_line(struct vfe_device *vfe, struct vfe_line *line)
+{
+	struct vfe_output *output = &line->output;
+	struct camss_buffer *buf;
+
+	if (output->armed_next || output->gen2.active_num >= 2)
+		return false;
+	buf = vfe_buf_get_pending(output);
+	if (!buf)
+		return false;
+
+	output->buf[output->gen2.active_num++] = buf;
+	vfe_wm_update(vfe, output->wm_idx[0], buf->addr[0], line);
+	vfe_reg_update(vfe, line->id);
+	output->armed_next = true;
+
+	return true;
+}
+
+/*
+ * The buffers of the next frame. The image path decides: the RDI lines of the
+ * VFE get one only for a frame the image path writes, so that the RAW and
+ * the processed image of a request are one frame. Output lock held. Returns
+ * whether the image path writes the next frame.
+ */
+static bool vfe17x_arm_next(struct vfe_device *vfe)
+{
+	struct vfe_line *pix = &vfe->line[VFE_LINE_PIX];
+	bool pix_next = false;
+	unsigned int i;
+
+	if (pix->output.state == VFE_OUTPUT_ON) {
+		vfe17x_arm_line(vfe, pix);
+		pix_next = pix->output.armed_next;
+	}
+
+	for (i = 0; i < vfe->res->line_num; i++) {
+		struct vfe_line *line = &vfe->line[i];
+
+		if (line->id != VFE_LINE_PIX && line->output.state == VFE_OUTPUT_ON &&
+		    pix_next)
+			vfe17x_arm_line(vfe, line);
+	}
+
+	return pix_next;
+}
+
+/*
+ * Epoch k of the pixel path: settle the buffers of frame k + 1, as its
+ * parameters go in now too. While the pixel path runs, buffers are queued
+ * for a frame only here or, until the end of frame k, when they come
+ * (vfe17x_queue_buffer()): a frame the image path skips for want of a buffer
+ * then takes no request's buffers, and the parameters, statistics, image and
+ * RDI buffers of a request stay on one frame. Returns whether the image path
+ * writes frame k + 1.
+ */
+static bool vfe17x_epoch_refill(struct vfe_device *vfe)
+{
+	bool next_written;
+	unsigned int i;
+
+	spin_lock(&vfe->output_lock);
+	/* A dual IFE slave writes the master's buffers */
+	if (vfe->dual.peer && !vfe->dual.master) {
+		spin_unlock(&vfe->output_lock);
+		return false;
+	}
+	/* Frame k uses one buffer: a second one out is frame k + 1's */
+	for (i = 0; i < vfe->res->line_num; i++)
+		vfe->line[i].output.armed_next = vfe->line[i].output.gen2.active_num == 2;
+	next_written = vfe17x_arm_next(vfe);
+	spin_unlock(&vfe->output_lock);
+
+	return next_written;
+}
+
+/*
+ * While the pixel path runs, a buffer goes to its line for the next frame
+ * when that frame still lacks one and can still take it (until the end of
+ * the current frame), and otherwise at the next epoch.
+ */
+static int vfe17x_queue_buffer(struct camss_video *vid, struct camss_buffer *buf)
+{
+	struct vfe_line *line = container_of(vid, struct vfe_line, video_out);
+	struct vfe_device *vfe = to_vfe(line);
+	struct vfe_line *pix = &vfe->line[VFE_LINE_PIX];
+	unsigned long flags;
+
+	if (!vfe17x_meta_running(vfe))
+		return vfe_queue_buffer_v2(vid, buf);
+
+	spin_lock_irqsave(&vfe->output_lock, flags);
+	vfe_buf_add_pending(&line->output, buf);
+	if (!(vfe->dual.peer && !vfe->dual.master)) {
+		vfe17x_meta_lock(vfe);
+		if (vfe17x_meta_join_open_locked(vfe)) {
+			bool was_next = pix->output.armed_next;
+
+			if (vfe17x_arm_next(vfe) && !was_next && vfe17x_meta_join_locked(vfe))
+				vfe_reg_update(vfe, VFE_LINE_PIX);
+		}
+		vfe17x_meta_unlock(vfe);
+	}
+	spin_unlock_irqrestore(&vfe->output_lock, flags);
+
+	return 0;
+}
+
+/*
  * vfe_isr - VFE module interrupt handler
  * @irq: Interrupt line
  * @dev: VFE device
@@ -1278,12 +1392,6 @@ static irqreturn_t vfe_isr(int irq, void *dev)
 			      vfe_bus_status[0] & VFE_BUS_ERR_MASK_0,
 			      vfe_bus_status[2] & VFE_BUS_ERR_MASK_2);
 
-	/* Epoch 0 of the pixel path: program the next frame's parameters */
-	if ((status0 & STATUS_0_CAMIF_EPOCH0) && vfe17x_meta_epoch(vfe)) {
-		spin_lock(&vfe->output_lock);
-		vfe_reg_update(vfe, VFE_LINE_PIX);
-		spin_unlock(&vfe->output_lock);
-	}
 	if (status0 & BIT(9))
 		vfe17x_meta_bus(vfe, vfe_bus_status[1]);
 
@@ -1304,6 +1412,21 @@ static irqreturn_t vfe_isr(int irq, void *dev)
 			if ((vfe_bus_status[1] & STATUS1_WM_CLIENT_BUF_DONE(wm)) &&
 			    !vfe_wm_is_pix(vfe, wm))
 				vfe->isr_ops.wm_done(vfe, wm);
+
+	/*
+	 * Epoch 0 of the pixel path: program the next frame's parameters.
+	 * After the buffers done in the same interrupt: those belong to an
+	 * earlier frame and are numbered by the epochs before this one.
+	 */
+	if (status0 & STATUS_0_CAMIF_EPOCH0) {
+		bool next_written = vfe17x_epoch_refill(vfe);
+
+		if (vfe17x_meta_epoch(vfe, next_written)) {
+			spin_lock(&vfe->output_lock);
+			vfe_reg_update(vfe, VFE_LINE_PIX);
+			spin_unlock(&vfe->output_lock);
+		}
+	}
 
 	return IRQ_HANDLED;
 }
@@ -1502,10 +1625,36 @@ static void vfe_isr_wm_done(struct vfe_device *vfe, u8 wm)
 		goto out_unlock;
 	}
 
+	/*
+	 * Before the first epoch: a frame that began before the stream, not
+	 * one of its frames. Queue the buffer's address again, after the one
+	 * already queued, instead of numbering it as frame 0. The RDI lines
+	 * of the VFE too, while its pixel path runs: they are numbered by its
+	 * epochs.
+	 */
+	if (line->id == VFE_LINE_PIX ? !vfe17x_meta_frame_started(vfe) :
+					vfe17x_meta_before_first_frame(vfe)) {
+		output->buf[0] = output->buf[1];
+		if (output->buf[0])
+			output->buf[1] = ready_buf;
+		else
+			output->buf[0] = ready_buf;
+		vfe_wm_update(vfe, output->wm_idx[0], ready_buf->addr[0], line);
+		vfe_reg_update(vfe, line->id);
+		spin_unlock_irqrestore(&vfe->output_lock, flags);
+		dev_dbg(vfe->camss->dev,
+			"VFE%d: image before the first frame, buffer reused\n", vfe->id);
+		return;
+	}
+
 	ready_buf->vb.vb2_buf.timestamp = ts;
 	ready_buf->vb.sequence = output->sequence++;
-	if (line->id == VFE_LINE_PIX)
-		vfe17x_meta_sequence(vfe, &ready_buf->vb.sequence);
+	/*
+	 * While the pixel path runs, the RDI lines of the same VFE number
+	 * their frames by its epochs too, so that RAW and processed buffers of
+	 * one sensor frame carry the same sequence.
+	 */
+	vfe17x_meta_sequence(vfe, &ready_buf->vb.sequence);
 	bad = output->error;
 	output->error = false;
 
@@ -1514,7 +1663,8 @@ static void vfe_isr_wm_done(struct vfe_device *vfe, u8 wm)
 	if (output->buf[0])
 		index = 1;
 
-	output->buf[index] = vfe_buf_get_pending(output);
+	/* While the pixel path runs, the next buffers go in at its epochs */
+	output->buf[index] = vfe17x_meta_running(vfe) ? NULL : vfe_buf_get_pending(output);
 
 	if (output->buf[index]) {
 		vfe_wm_update(vfe, output->wm_idx[0], output->buf[index]->addr[0], line);
@@ -1582,7 +1732,7 @@ static const struct vfe_isr_ops vfe_isr_ops_170 = {
 };
 
 static const struct camss_video_ops vfe_video_ops_170 = {
-	.queue_buffer = vfe_queue_buffer_v2,
+	.queue_buffer = vfe17x_queue_buffer,
 	.flush_buffers = vfe_flush_buffers,
 };
 

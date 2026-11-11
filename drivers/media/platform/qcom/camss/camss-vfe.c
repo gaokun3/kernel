@@ -633,6 +633,7 @@ int vfe_enable_output_v2(struct vfe_line *line)
 	WARN_ON(output->gen2.active_num);
 
 	output->state = VFE_OUTPUT_ON;
+	output->armed_next = false;
 	output->error = false;
 
 	output->sequence = 0;
@@ -916,6 +917,8 @@ static int vfe_disable_output(struct vfe_line *line)
 	for (i = 0; i < output->wm_num; i++)
 		vfe->res->hw_ops->vfe_wm_stop(vfe, output->wm_idx[i]);
 	output->gen2.active_num = 0;
+	/* No more buffers go in, such as at the pixel path's epochs */
+	output->state = VFE_OUTPUT_STOPPING;
 	spin_unlock_irqrestore(&vfe->output_lock, flags);
 
 	/* The reset stops every line of the VFE: leave it to the last one */

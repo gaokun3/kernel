@@ -78,6 +78,7 @@ struct vfe_output {
 	enum vfe_output_state state;
 	unsigned int sequence;
 	bool error;		/* the frame being written came in corrupt */
+	bool armed_next;	/* vfe-17x: a buffer waits for the next frame */
 
 	int wait_reg_update;
 	struct completion sof;

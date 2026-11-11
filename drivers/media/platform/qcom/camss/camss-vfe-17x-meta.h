@@ -18,7 +18,14 @@ void vfe17x_meta_unregister(struct vfe_device *vfe);
 void vfe17x_meta_start(struct vfe_device *vfe, u32 width, u32 height);
 void vfe17x_meta_stop(struct vfe_device *vfe);
 void vfe17x_meta_fatal(struct vfe_device *vfe);
-bool vfe17x_meta_epoch(struct vfe_device *vfe);
+bool vfe17x_meta_frame_started(struct vfe_device *vfe);
+bool vfe17x_meta_before_first_frame(struct vfe_device *vfe);
+bool vfe17x_meta_epoch(struct vfe_device *vfe, bool next_written);
+bool vfe17x_meta_running(struct vfe_device *vfe);
+void vfe17x_meta_lock(struct vfe_device *vfe);
+void vfe17x_meta_unlock(struct vfe_device *vfe);
+bool vfe17x_meta_join_open_locked(struct vfe_device *vfe);
+bool vfe17x_meta_join_locked(struct vfe_device *vfe);
 void vfe17x_meta_bus(struct vfe_device *vfe, u32 bus_status1);
 void vfe17x_meta_sequence(struct vfe_device *vfe, u32 *sequence);
 

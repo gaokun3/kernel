@@ -145,6 +145,17 @@ struct vfe_pix_meta {
 	struct list_head stats_queue;
 	struct ife_stats_buf *stats_cur;
 	bool running;
+	/*
+	 * The frame after the current one is written by the image path, so
+	 * it belongs to a request: it takes the next parameters and
+	 * statistics buffers. Decided at each epoch.
+	 */
+	bool next_written;
+	/*
+	 * From an epoch to the end of that frame, a buffer for the next frame
+	 * may still join it, with its parameters (vfe17x_meta_join()).
+	 */
+	bool join_open;
 	u32 width;
 	u32 height;
 	u32 frame;		/* epochs since the stream start */
@@ -560,6 +571,8 @@ void vfe17x_meta_start(struct vfe_device *vfe, u32 width, u32 height)
 	meta->width = width;
 	meta->height = height;
 	meta->frame = 0;
+	meta->next_written = true;
+	meta->join_open = false;
 	meta->stripe_x = 0;
 	meta->stripe_w = width;
 	meta->frame_x = 0;
@@ -655,7 +668,73 @@ void vfe17x_meta_fatal(struct vfe_device *vfe)
  * CAMIF epoch 0 interrupt: program the parameters of a later frame. Returns
  * true if registers changed and need a PIX register update.
  */
-bool vfe17x_meta_epoch(struct vfe_device *vfe)
+/* The pixel path of the VFE runs, with its parameters and statistics */
+bool vfe17x_meta_running(struct vfe_device *vfe)
+{
+	struct vfe_pix_meta *meta = vfe->pix_meta;
+	bool running;
+
+	if (!meta)
+		return false;
+
+	spin_lock(&meta->lock);
+	running = meta->running;
+	spin_unlock(&meta->lock);
+
+	return running;
+}
+
+/*
+ * A buffer joining the next frame after its epoch (vfe17x_queue_buffer())
+ * decides under the meta lock, which the end of the frame takes to settle
+ * the statistics: the two do not interleave. Output lock held, interrupts
+ * off.
+ */
+void vfe17x_meta_lock(struct vfe_device *vfe)
+{
+	if (vfe->pix_meta)
+		spin_lock(&vfe->pix_meta->lock);
+}
+
+void vfe17x_meta_unlock(struct vfe_device *vfe)
+{
+	if (vfe->pix_meta)
+		spin_unlock(&vfe->pix_meta->lock);
+}
+
+/* From an epoch until that frame ends, the next frame can still be joined */
+bool vfe17x_meta_join_open_locked(struct vfe_device *vfe)
+{
+	struct vfe_pix_meta *meta = vfe->pix_meta;
+
+	return meta && meta->running && meta->join_open;
+}
+
+/*
+ * The image path got a buffer for the next frame after its epoch, before the
+ * end of the current frame: the next frame belongs to a request after all.
+ * Apply its parameters now, before the next frame starts; its statistics
+ * buffer is picked at the end of this frame. Returns true if registers need
+ * a PIX register update.
+ */
+bool vfe17x_meta_join_locked(struct vfe_device *vfe)
+{
+	struct vfe_pix_meta *meta = vfe->pix_meta;
+
+	if (!vfe17x_meta_join_open_locked(vfe) || meta->next_written)
+		return false;
+
+	meta->next_written = true;
+	return ife_params_apply_next(meta, meta->frame);
+}
+
+/*
+ * @next_written: the image path has a buffer for the next frame. A frame it
+ * skips, for want of a buffer, belongs to no request: it takes neither the
+ * next parameters nor a statistics buffer, which stay with the frame of
+ * their request.
+ */
+bool vfe17x_meta_epoch(struct vfe_device *vfe, bool next_written)
 {
 	struct vfe_pix_meta *meta = vfe->pix_meta;
 	bool applied = false;
@@ -671,7 +750,10 @@ bool vfe17x_meta_epoch(struct vfe_device *vfe)
 	if (running) {
 		ev.u.frame_sync.frame_sequence = meta->frame;
 		meta->frame++;
-		applied = ife_params_apply_next(meta, meta->frame);
+		meta->next_written = next_written;
+		meta->join_open = true;
+		if (next_written)
+			applied = ife_params_apply_next(meta, meta->frame);
 	}
 	spin_unlock(&meta->lock);
 
@@ -687,6 +769,42 @@ bool vfe17x_meta_epoch(struct vfe_device *vfe)
  * images, statistics and parameters keep the same frame numbers when the
  * driver runs out of image buffers.
  */
+/*
+ * Whether the first frame of the stream started (its epoch came). A buffer
+ * that completes before belongs to a frame that began before the stream:
+ * not one of its frames.
+ */
+bool vfe17x_meta_frame_started(struct vfe_device *vfe)
+{
+	struct vfe_pix_meta *meta = vfe->pix_meta;
+	bool started;
+
+	if (!meta)
+		return true;
+
+	spin_lock(&meta->lock);
+	started = meta->running && meta->frame;
+	spin_unlock(&meta->lock);
+
+	return started;
+}
+
+/* The pixel path runs and its first frame did not start yet */
+bool vfe17x_meta_before_first_frame(struct vfe_device *vfe)
+{
+	struct vfe_pix_meta *meta = vfe->pix_meta;
+	bool before;
+
+	if (!meta)
+		return false;
+
+	spin_lock(&meta->lock);
+	before = meta->running && !meta->frame;
+	spin_unlock(&meta->lock);
+
+	return before;
+}
+
 void vfe17x_meta_sequence(struct vfe_device *vfe, u32 *sequence)
 {
 	struct vfe_pix_meta *meta = vfe->pix_meta;
@@ -730,7 +848,27 @@ void vfe17x_meta_bus(struct vfe_device *vfe, u32 bus_status1)
 		return;
 	}
 	done = meta->stats_cur;
-	ife_stats_next(meta);
+	/* The frame ends: whether the next one belongs to a request is settled */
+	meta->join_open = false;
+	/*
+	 * Before the first epoch: the grid of a frame that began before the
+	 * stream, not one of its frames. Have the buffer written again, by
+	 * the first frame, rather than number this grid as frame 0.
+	 */
+	if (done && !meta->frame) {
+		ife_stats_set_addr(meta, done->addr);
+		spin_unlock(&meta->lock);
+		dev_dbg(vfe->camss->dev,
+			"VFE%d: statistics before the first frame, buffer reused\n", vfe->id);
+		return;
+	}
+	/* A frame the image path skips writes its grid to the scratch buffer */
+	if (meta->next_written) {
+		ife_stats_next(meta);
+	} else {
+		meta->stats_cur = NULL;
+		ife_stats_set_addr(meta, meta->scratch_addr);
+	}
 	/* Dual IFE: wait for the slave's grid of the same frame */
 	if (done && meta->dual_slave &&
 	    meta->slave_stats_ts + VFE_DUAL_MATCH_NS <= ktime_get_ns()) {
