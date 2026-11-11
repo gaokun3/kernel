@@ -909,6 +909,7 @@ static int vfe_disable_output(struct vfe_line *line)
 	struct vfe_output *output = &line->output;
 	unsigned long flags;
 	unsigned int i;
+	bool last;
 
 	spin_lock_irqsave(&vfe->output_lock, flags);
 	for (i = 0; i < output->wm_num; i++)
@@ -916,7 +917,12 @@ static int vfe_disable_output(struct vfe_line *line)
 	output->gen2.active_num = 0;
 	spin_unlock_irqrestore(&vfe->output_lock, flags);
 
-	return vfe_reset(vfe);
+	/* The reset stops every line of the VFE: leave it to the last one */
+	mutex_lock(&vfe->stream_lock);
+	last = vfe->stream_count == 1;
+	mutex_unlock(&vfe->stream_lock);
+
+	return last ? vfe_reset(vfe) : 0;
 }
 
 /*
