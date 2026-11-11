@@ -167,6 +167,22 @@ static struct rpmhpd mmcx_ao_w_cx_parent = {
 	.res_name = "mmcx.lvl",
 };
 
+static struct rpmhpd mmcx_ao_w_mx_parent;
+static struct rpmhpd mmcx_w_mx_parent = {
+	.pd = { .name = "mmcx", },
+	.peer = &mmcx_ao_w_mx_parent,
+	.parent = &mx.pd,
+	.res_name = "mmcx.lvl",
+};
+
+static struct rpmhpd mmcx_ao_w_mx_parent = {
+	.pd = { .name = "mmcx_ao", },
+	.active_only = true,
+	.peer = &mmcx_w_mx_parent,
+	.parent = &mx_ao.pd,
+	.res_name = "mmcx.lvl",
+};
+
 static struct rpmhpd mss = {
 	.pd = { .name = "mss", },
 	.res_name = "mss.lvl",
@@ -788,8 +804,8 @@ static struct rpmhpd *sc8280xp_rpmhpds[] = {
 	[SC8280XP_GFX] = &gfx,
 	[SC8280XP_LCX] = &lcx,
 	[SC8280XP_LMX] = &lmx,
-	[SC8280XP_MMCX] = &mmcx,
-	[SC8280XP_MMCX_AO] = &mmcx_ao,
+	[SC8280XP_MMCX] = &mmcx_w_mx_parent,
+	[SC8280XP_MMCX_AO] = &mmcx_ao_w_mx_parent,
 	[SC8280XP_MX] = &mx,
 	[SC8280XP_MX_AO] = &mx_ao,
 	[SC8280XP_MXC] = &mxc,
