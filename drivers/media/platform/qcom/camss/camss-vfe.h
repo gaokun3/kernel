@@ -120,7 +120,12 @@ struct vfe_hw_ops {
 	void (*vfe_buf_done)(struct vfe_device *vfe, int port_id);
 	void (*vfe_wm_update)(struct vfe_device *vfe, u8 wm, u32 addr,
 			      struct vfe_line *line);
+	/* Optional parameters and statistics nodes of the pixel pipeline */
+	int (*meta_register)(struct vfe_device *vfe, struct v4l2_device *v4l2_dev);
+	void (*meta_unregister)(struct vfe_device *vfe);
 };
+
+struct vfe_pix_meta;
 
 struct vfe_isr_ops {
 	void (*reset_ack)(struct vfe_device *vfe);
@@ -168,6 +173,7 @@ struct vfe_device {
 	enum vfe_line_id wm_output_map[MSM_VFE_IMAGE_MASTERS_NUM];
 	struct vfe_line line[VFE_LINE_NUM_MAX];
 	u32 reg_update;
+	struct vfe_pix_meta *pix_meta;
 	u8 was_streaming;
 	const struct vfe_subdev_resources *res;
 	const struct vfe_hw_ops_gen1 *ops_gen1;

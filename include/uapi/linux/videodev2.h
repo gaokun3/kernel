@@ -889,6 +889,10 @@ struct v4l2_pix_format {
 #define V4L2_META_FMT_MALI_C55_PARAMS	v4l2_fourcc('C', '5', '5', 'P') /* ARM Mali-C55 Parameters */
 #define V4L2_META_FMT_MALI_C55_STATS	v4l2_fourcc('C', '5', '5', 'S') /* ARM Mali-C55 3A Statistics */
 
+/* Vendor specific - used for Qualcomm CAMSS Titan 17x IFE pixel pipeline */
+#define V4L2_META_FMT_QCOM_IFE17X_PARAMS	v4l2_fourcc('Q', 'I', '7', 'P') /* Qualcomm IFE 17x Parameters */
+#define V4L2_META_FMT_QCOM_IFE17X_STATS	v4l2_fourcc('Q', 'I', '7', 'S') /* Qualcomm IFE 17x 3A Statistics */
+
 #ifdef __KERNEL__
 /*
  * Line-based metadata formats. Remember to update v4l_fill_fmtdesc() when

@@ -13,6 +13,7 @@
 
 #include "camss.h"
 #include "camss-vfe.h"
+#include "camss-vfe-17x-meta.h"
 
 #define VFE_GLOBAL_RESET_CMD			(0x018)
 #define		GLOBAL_RESET_CMD_CORE		BIT(0)
@@ -77,6 +78,7 @@
 
 #define VFE_IRQ_STATUS_0				(0x06c)
 #define		STATUS_0_CAMIF_SOF			BIT(0)
+#define		STATUS_0_CAMIF_EPOCH0			BIT(2)
 #define		STATUS_0_CAMIF_REG_UPDATE		BIT(4)
 #define		STATUS_0_RDI_REG_UPDATE(n)		BIT((n) + 5)
 #define		STATUS_0_IMAGE_MASTER_PING_PONG(n)	BIT((n) + 8)
@@ -852,6 +854,7 @@ static int vfe_pix_configure(struct vfe_device *vfe, struct vfe_line *line)
 	writel_relaxed(BIT(VFE_WM_PIX_FULL_Y) | BIT(VFE_WM_PIX_FULL_C),
 		       vfe->base + VFE_BUS_COMP_MASK(PIX_COMP_GROUP));
 
+	vfe17x_meta_start(vfe, sink->width, sink->height);
 
 	return 0;
 }
@@ -1008,6 +1011,15 @@ static irqreturn_t vfe_isr(int irq, void *dev)
 
 	if (status1 & STATUS_1_VIOLATION)
 		vfe_violation_read(vfe);
+
+	/* Epoch 0 of the pixel path: program the next frame's parameters */
+	if ((status0 & STATUS_0_CAMIF_EPOCH0) && vfe17x_meta_epoch(vfe)) {
+		spin_lock(&vfe->output_lock);
+		vfe_reg_update(vfe, VFE_LINE_PIX);
+		spin_unlock(&vfe->output_lock);
+	}
+	if (status0 & BIT(9))
+		vfe17x_meta_bus(vfe, vfe_bus_status[1]);
 
 	for (i = VFE_LINE_RDI0; i < vfe->res->line_num; i++)
 		if (status0 & vfe_reg_update_done_bit(vfe, i))
@@ -1214,6 +1226,8 @@ static void vfe_isr_wm_done(struct vfe_device *vfe, u8 wm)
 
 	ready_buf->vb.vb2_buf.timestamp = ts;
 	ready_buf->vb.sequence = output->sequence++;
+	if (line->id == VFE_LINE_PIX)
+		vfe17x_meta_sequence(vfe, &ready_buf->vb.sequence);
 
 	index = 0;
 	output->buf[0] = output->buf[1];
@@ -1265,6 +1279,17 @@ static void vfe_subdev_init(struct device *dev, struct vfe_device *vfe)
 	vfe->video_ops = vfe_video_ops_170;
 }
 
+/* Stop the pixel path statistics before the generic disable resets the VFE */
+static int vfe17x_disable(struct vfe_line *line)
+{
+	struct vfe_device *vfe = to_vfe(line);
+
+	if (vfe_line_has_pix_pipeline(vfe, line->id))
+		vfe17x_meta_stop(vfe);
+
+	return vfe_disable(line);
+}
+
 const struct vfe_hw_ops vfe_ops_170 = {
 	.global_reset = vfe_global_reset,
 	.hw_version = vfe_hw_version,
@@ -1275,11 +1300,13 @@ const struct vfe_hw_ops vfe_ops_170 = {
 	.reg_update_clear = vfe_reg_update_clear,
 	.reg_update = vfe_reg_update,
 	.subdev_init = vfe_subdev_init,
-	.vfe_disable = vfe_disable,
+	.vfe_disable = vfe17x_disable,
 	.vfe_enable = vfe_enable,
 	.vfe_halt = vfe_halt,
 	.violation_read = vfe_violation_read,
 	.vfe_wm_start = vfe_wm_start,
 	.vfe_wm_stop = vfe_wm_stop,
 	.vfe_wm_update = vfe_wm_update,
+	.meta_register = vfe17x_meta_register,
+	.meta_unregister = vfe17x_meta_unregister,
 };

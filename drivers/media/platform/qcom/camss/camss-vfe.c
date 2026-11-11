@@ -20,6 +20,7 @@
 #include <linux/spinlock.h>
 #include <media/media-entity.h>
 #include <media/v4l2-device.h>
+#include <media/v4l2-event.h>
 #include <media/v4l2-subdev.h>
 
 #include "camss-vfe.h"
@@ -2072,8 +2073,23 @@ static int vfe_link_setup(struct media_entity *entity,
 	return 0;
 }
 
+/*
+ * Frame sync events, on the lines whose hardware support code sets
+ * V4L2_SUBDEV_FL_HAS_EVENTS
+ */
+static int vfe_subscribe_event(struct v4l2_subdev *sd, struct v4l2_fh *fh,
+			       struct v4l2_event_subscription *sub)
+{
+	if (sub->type != V4L2_EVENT_FRAME_SYNC)
+		return -EINVAL;
+
+	return v4l2_event_subscribe(fh, sub, 0, NULL);
+}
+
 static const struct v4l2_subdev_core_ops vfe_core_ops = {
 	.s_power = vfe_set_power,
+	.subscribe_event = vfe_subscribe_event,
+	.unsubscribe_event = v4l2_event_subdev_unsubscribe,
 };
 
 static const struct v4l2_subdev_video_ops vfe_video_ops = {
@@ -2249,6 +2265,14 @@ int msm_vfe_register_entities(struct vfe_device *vfe,
 		}
 	}
 
+	if (vfe->res->hw_ops->meta_register && vfe->res->line_num > VFE_LINE_PIX &&
+	    vfe_line_has_pix_pipeline(vfe, VFE_LINE_PIX)) {
+		ret = vfe->res->hw_ops->meta_register(vfe, v4l2_dev);
+		if (ret < 0)
+			dev_warn(dev, "VFE%d: no parameters/statistics nodes: %d\n",
+				 vfe->id, ret);
+	}
+
 	return 0;
 
 error_link:
@@ -2280,6 +2304,9 @@ error_init:
 void msm_vfe_unregister_entities(struct vfe_device *vfe)
 {
 	int i;
+
+	if (vfe->res->hw_ops->meta_unregister)
+		vfe->res->hw_ops->meta_unregister(vfe);
 
 	mutex_destroy(&vfe->power_lock);
 	mutex_destroy(&vfe->stream_lock);
