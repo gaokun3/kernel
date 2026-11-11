@@ -657,6 +657,26 @@ int vfe_enable_output_v2(struct vfe_line *line)
 	return 0;
 }
 
+/* As vfe_queue_buffer_v2(), with the output lock held */
+void vfe_queue_buffer_v2_locked(struct vfe_line *line, struct camss_buffer *buf)
+{
+	struct vfe_device *vfe = to_vfe(line);
+	const struct vfe_hw_ops *ops = vfe->res->hw_ops;
+	struct vfe_output *output = &line->output;
+
+	lockdep_assert_held(&vfe->output_lock);
+
+	if (output->state == VFE_OUTPUT_ON &&
+	    output->gen2.active_num < 2) {
+		output->buf[output->gen2.active_num++] = buf;
+		ops->vfe_wm_update(vfe, output->wm_idx[0],
+				   buf->addr[0], line);
+		ops->reg_update(vfe, line->id);
+	} else {
+		vfe_buf_add_pending(output, buf);
+	}
+}
+
 /*
  * vfe_queue_buffer_v2 - Add empty buffer
  * @vid: Video device structure
@@ -672,24 +692,10 @@ int vfe_queue_buffer_v2(struct camss_video *vid,
 {
 	struct vfe_line *line = container_of(vid, struct vfe_line, video_out);
 	struct vfe_device *vfe = to_vfe(line);
-	const struct vfe_hw_ops *ops = vfe->res->hw_ops;
-	struct vfe_output *output;
 	unsigned long flags;
 
-	output = &line->output;
-
 	spin_lock_irqsave(&vfe->output_lock, flags);
-
-	if (output->state == VFE_OUTPUT_ON &&
-	    output->gen2.active_num < 2) {
-		output->buf[output->gen2.active_num++] = buf;
-		ops->vfe_wm_update(vfe, output->wm_idx[0],
-				   buf->addr[0], line);
-		ops->reg_update(vfe, line->id);
-	} else {
-		vfe_buf_add_pending(output, buf);
-	}
-
+	vfe_queue_buffer_v2_locked(line, buf);
 	spin_unlock_irqrestore(&vfe->output_lock, flags);
 
 	return 0;
@@ -1335,6 +1341,11 @@ int vfe_flush_buffers(struct camss_video *vid,
 
 	if (output->buf[1])
 		vb2_buffer_done(&output->buf[1]->vb.vb2_buf, state);
+
+	/* No stale pointers for a later start that arms fewer buffers */
+	output->buf[0] = NULL;
+	output->buf[1] = NULL;
+	output->gen2.active_num = 0;
 
 	if (output->last_buffer) {
 		vb2_buffer_done(&output->last_buffer->vb.vb2_buf, state);

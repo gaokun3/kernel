@@ -38,6 +38,7 @@
 #define		LENS_EN_BLS		BIT(11)
 #define		LENS_EN_PDPC		BIT(13)
 #define VFE_MODULE_STATS_EN		0x044
+#define		STATS_EN_BF		BIT(2)
 #define		STATS_EN_AWB_BG		BIT(3)
 #define VFE_MODULE_COLOR_EN		0x048
 #define		COLOR_EN_CC		BIT(1)
@@ -45,8 +46,15 @@
 #define VFE_REG_UPDATE_CMD		0x4ac
 #define		REG_UPDATE_PIX		BIT(0)
 #define VFE_CAMIF_EPOCH_IRQ		0x4a0
-/* Epoch 0 at line 20 like the Windows driver (19), epoch 1 off */
-#define		CAMIF_EPOCH_CFG		(20 << 16 | 0x3fff)
+/*
+ * [31:16] epoch 0, [15:0] epoch 1. Epoch 0 at line 20 like the Windows driver
+ * (19): frame start for the sensor controls, and where the next frame is
+ * settled. Epoch 1 at three quarters of the frame closes that: the addresses
+ * of the next frame are queued a quarter of a frame before it starts, ahead
+ * of the frame end, which can come within half a millisecond of it.
+ */
+#define		CAMIF_EPOCH0_LINE	20
+#define		CAMIF_EPOCH_CFG(height)	(CAMIF_EPOCH0_LINE << 16 | ((height) * 3 / 4))
 
 #define VFE_BLS_CFG			0x6b0
 #define		BLS_CFG_SCALE		15
@@ -66,6 +74,7 @@
 #define VFE_DMI_CFG			0xc24
 #define		DMI_CFG_AUTO_INC	BIT(8)
 #define VFE_DMI_ADDR			0xc28
+#define VFE_DMI_DATA_HI			0xc2c
 #define VFE_DMI_DATA_LO			0xc30
 #define GAMMA_ENTRIES			64
 
@@ -92,8 +101,40 @@
 #define VFE_AWB_BG_LUMA_CFG		0xc14
 #define VFE_AWB_BG_CFG			0xcb0
 
-/* Bus write master of the AWB grid, frame based, PLAIN64 */
+/* BFStats23, as the Windows driver programs it */
+#define VFE_BF_CFG			0xae4
+#define		BF_CFG_GREEN		BIT(0)
+#define		BF_CFG_GAMMA		BIT(1)
+#define		BF_CFG_GAMMA_BANK	BIT(2)
+#define		BF_CFG_H1_IIR		BIT(9)
+#define		BF_CFG_V_IIR		BIT(13)
+#define		BF_CFG_ROI_BANK		BIT(16)
+#define VFE_BF_LUMA(n)			(0xae8 + 4 * (n))	/* 2 */
+#define VFE_BF_FIR(n)			(0xaf0 + 4 * (n))	/* 4 */
+#define VFE_BF_H1_IIR(n)		(0xb00 + 4 * (n))	/* 5 */
+#define VFE_BF_SHIFT			0xb4c	/* [3:0] H1, [19:16] V */
+#define VFE_BF_H1_CORING_THR		0xb50
+#define VFE_BF_H1_CORING(n)		(0xb54 + 4 * (n))	/* 4 */
+#define VFE_BF_V_CORING_THR		0xb78
+#define VFE_BF_V_CORING(n)		(0xb7c + 4 * (n))	/* 4 */
+#define VFE_BF_H1_CORING_GAIN		0xb8c
+#define VFE_BF_V_CORING_GAIN		0xb90
+#define VFE_BF_SCALE(n)			(0xb94 + 4 * (n))	/* 6 */
+#define VFE_BF_ACTIVE_START		0xca4
+#define VFE_BF_ACTIVE_END		0xca8
+#define VFE_BF_ROI_DMI_BANK		0x40
+#define VFE_BF_GAMMA_DMI_BANK		0x42
+/* The V filter's IIR is split in two register ranges */
+static const u16 vfe_bf_v_iir[5] = { 0xb40, 0xb44, 0xb48, 0xc9c, 0xca0 };
+
+/* Regions starting on one row, and the columns between the ends of two */
+#define IFE_BF_ROIS_PER_ROW		21
+#define IFE_BF_END_SPACING		6
+
+/* Bus write masters of the focus statistics and the AWB grid, frame based, PLAIN64 */
+#define VFE_WM_BF			14
 #define VFE_WM_AWB_BG			15
+#define IFE_STATS_WMS			(BIT(VFE_WM_BF) | BIT(VFE_WM_AWB_BG))
 #define VFE_BUS_WM_CFG(n)		(0x2208 + (n) * 0x100)
 #define VFE_BUS_WM_IMAGE_ADDR(n)	(0x2214 + (n) * 0x100)
 #define VFE_BUS_WM_BUFFER_WIDTH_CFG(n)	(0x221c + (n) * 0x100)
@@ -110,6 +151,12 @@
 
 #define IFE_PARAMS_SIZE		v4l2_isp_params_buffer_size(IFE17X_PARAMS_MAX_SIZE)
 #define IFE_STATS_SIZE		sizeof(struct ife17x_stats_buffer)
+/*
+ * Wait for the frames the statistics write masters have addresses of: three
+ * frame periods and a margin, at least IFE_STATS_DRAIN_MIN_MS.
+ */
+#define IFE_STATS_DRAIN_MIN_MS	500
+#define IFE_STATS_DRAIN_MAX_MS	5000
 
 struct ife_params_buf {
 	struct vb2_v4l2_buffer vb;
@@ -138,32 +185,57 @@ struct vfe_pix_meta {
 
 	void *scratch;
 	dma_addr_t scratch_addr;
+	/* Statistics buffers completed or the pixel path stopped */
+	wait_queue_head_t stats_wq;
 
 	/* Everything below is protected by the lock */
 	spinlock_t lock;
 	struct list_head params_queue;
 	struct list_head stats_queue;
+	u32 stats_en;		/* STATS_EN bits of ours, as programmed */
+	/*
+	 * Statistics write masters done between epochs 0 of frame k and k + 1
+	 * wrote frame k: the focus statistics when their last region ends, the
+	 * AWB grid at the end of the frame. Frame k's buffer (stats_cur; none
+	 * for the scratch buffer) completes once every write master the frame
+	 * was set up with (cur_wms) is done (cur_got), and fails at the next
+	 * epoch 0 otherwise. Frame k + 1 is settled (next_set) before epoch 1
+	 * of frame k, its addresses queued then.
+	 */
 	struct ife_stats_buf *stats_cur;
+	u32 cur_wms;
+	u32 cur_got;
+	struct ife_stats_buf *stats_next;
+	u32 next_wms;
+	u32 next_got;		/* done with frame k + 1 before its epoch 0 */
+	bool next_set;
 	bool running;
+	/* The pixel path is wedged until the next start: no frame completes */
+	bool wedged;
 	/*
 	 * The frame after the current one is written by the image path, so
 	 * it belongs to a request: it takes the next parameters and
-	 * statistics buffers. Decided at each epoch.
+	 * statistics buffers. Decided at epoch 0.
 	 */
 	bool next_written;
 	/*
-	 * From an epoch to the end of that frame, a buffer for the next frame
-	 * may still join it, with its parameters (vfe17x_meta_join()).
+	 * From epoch 0 to epoch 1, a buffer for the next frame may still join
+	 * it, with its parameters (vfe17x_meta_join()).
 	 */
 	bool join_open;
 	u32 width;
 	u32 height;
 	u32 frame;		/* epochs since the stream start */
+	u64 epoch_ns;		/* time of the last epoch 0 */
+	u64 period_ns;		/* between the last two epochs 0 */
 	u8 gamma_bank;		/* LUT banks in use: 0 even, 1 odd */
 	bool awb_bg_pending;	/* AWB block seen before the stream start */
 	struct ife17x_params_awb_bg awb_bg;
 	bool pdpc_mask_valid;	/* the PDPC mask bank holds pdpc_mask */
 	u32 pdpc_mask[IFE17X_PDPC_MASK_ROWS];
+	u8 bf_bank;		/* BF ROI and gamma LUT banks in use */
+	bool bf_valid;		/* the BF registers and banks hold bf */
+	struct ife17x_params_bf bf;
 
 	/*
 	 * Dual IFE, under the master's lock: the master applies its parameters
@@ -199,6 +271,23 @@ static void vfe_rmw(struct vfe_device *vfe, u32 reg, u32 clear, u32 set)
 		       vfe->base + reg);
 }
 
+/* Turn statistics on or off, from the next register update */
+static void ife_stats_enable(struct vfe_pix_meta *meta, u32 bit, bool on)
+{
+	vfe_rmw(meta->vfe, VFE_MODULE_STATS_EN, bit, on ? bit : 0);
+	if (on)
+		meta->stats_en |= bit;
+	else
+		meta->stats_en &= ~bit;
+}
+
+/* The statistics write masters that write a frame with the programmed setup */
+static u32 ife_stats_wms(struct vfe_pix_meta *meta)
+{
+	return (meta->stats_en & STATS_EN_AWB_BG ? BIT(VFE_WM_AWB_BG) : 0) |
+	       (meta->stats_en & STATS_EN_BF ? BIT(VFE_WM_BF) : 0);
+}
+
 /* -----------------------------------------------------------------------------
  * Parameter blocks, called with the lock held and the VFE powered
  */
@@ -211,6 +300,7 @@ union ife_params_block {
 	const struct ife17x_params_gamma *gamma;
 	const struct ife17x_params_awb_bg *awb_bg;
 	const struct ife17x_params_pdpc *pdpc;
+	const struct ife17x_params_bf *bf;
 	const u8 *data;
 };
 
@@ -243,8 +333,10 @@ static void ife_params_bls(struct vfe_pix_meta *meta, union ife_params_block blo
 
 static void ife_params_wb(struct vfe_pix_meta *meta, union ife_params_block block)
 {
+	static const u16 unity[3] = { 128, 128, 128 };
 	struct vfe_device *vfe = meta->vfe;
-	const u16 *g = block.wb->gain;
+	/* The gains cannot be bypassed: disabled is 1.0 */
+	const u16 *g = ife_block_disabled(block) ? unity : block.wb->gain;
 
 	writel_relaxed((g[1] & 0xfff) | (g[2] & 0xfff) << 16,
 		       vfe->base + VFE_WB_CFG_0);
@@ -367,12 +459,14 @@ static void ife_awb_bg_program(struct vfe_pix_meta *meta,
 	/*
 	 * Dual IFE: the master takes the left half of the grid columns over
 	 * its stripe, the slave the right half over its own, and the slave's
-	 * records follow the master's in the buffer.
+	 * records follow the master's in the buffer. One column counts as two.
 	 */
-	if (meta->dual_slave && hn > 1) {
+	if (meta->dual_slave || meta->dual_master)
+		hn = max(hn, 2U);
+	if (meta->dual_slave) {
 		hn /= 2;
 		meta->slave_stats_off = hn * vn * sizeof(struct ife17x_awb_bg_region);
-	} else if (meta->dual_master && hn > 1) {
+	} else if (meta->dual_master) {
 		hn -= hn / 2;
 	}
 	rw = clamp_t(u32, (meta->stripe_w / hn) & ~1U, 6, 390);
@@ -389,16 +483,208 @@ static void ife_awb_bg_program(struct vfe_pix_meta *meta,
 	writel_relaxed(0, vfe->base + VFE_AWB_BG_LUMA_CFG);
 	writel_relaxed(0x00ffff00, vfe->base + VFE_AWB_BG_CFG);
 	vfe_rmw(vfe, VFE_STATS_CFG, 0, STATS_CFG_FIXED);
-	vfe_rmw(vfe, VFE_MODULE_STATS_EN, 0, STATS_EN_AWB_BG);
+	ife_stats_enable(meta, STATS_EN_AWB_BG, true);
 }
 
 static void ife_params_awb_bg(struct vfe_pix_meta *meta, union ife_params_block block)
 {
 	if (ife_block_disabled(block)) {
-		vfe_rmw(meta->vfe, VFE_MODULE_STATS_EN, STATS_EN_AWB_BG, 0);
+		ife_stats_enable(meta, STATS_EN_AWB_BG, false);
 		return;
 	}
 	ife_awb_bg_program(meta, block.awb_bg);
+}
+
+/* A 64-bit DMI entry: the high half first, the low half writes the entry */
+static void ife_dmi_write64(struct vfe_device *vfe, u64 v)
+{
+	writel_relaxed(upper_32_bits(v), vfe->base + VFE_DMI_DATA_HI);
+	writel_relaxed(lower_32_bits(v), vfe->base + VFE_DMI_DATA_LO);
+}
+
+/* Biquad coefficients b10 b11 b12 a11 a12 b20 b21 b22 a21 a22 to registers */
+static void ife_bf_iir(const s16 *c, u32 r[5])
+{
+	r[0] = (u16)c[0] | (u32)(u16)c[1] << 16;
+	r[1] = (u16)c[2] | (u32)(u16)c[7] << 16;
+	r[2] = (u16)c[3] | (u32)(u16)c[4] << 16;
+	r[3] = (u16)c[5] | (u32)(u16)c[6] << 16;
+	r[4] = (u16)c[8] | (u32)(u16)c[9] << 16;
+}
+
+/* 17 coring points of 5 bits, five to a register in 6-bit slots */
+static void ife_bf_coring(struct vfe_device *vfe, u32 thr_reg, u32 reg0,
+			  const struct ife17x_bf_filter *f)
+{
+	unsigned int i;
+	u32 v[4] = {};
+
+	for (i = 0; i < IFE17X_BF_CORING_POINTS; i++)
+		v[i / 5] |= (u32)f->coring[i] << (6 * (i % 5));
+	writel_relaxed(f->coring_threshold, vfe->base + thr_reg);
+	for (i = 0; i < ARRAY_SIZE(v); i++)
+		writel_relaxed(v[i], vfe->base + reg0 + 4 * i);
+}
+
+/*
+ * Whether the regions [@first, @first + @count) fit the input of this IFE,
+ * which starts at frame column @dx; the rest was checked in .buf_prepare()
+ */
+static bool ife_bf_fits(struct vfe_pix_meta *meta, const struct ife17x_params_bf *bf,
+			unsigned int first, unsigned int count, u32 dx)
+{
+	unsigned int i;
+
+	for (i = first; i < first + count; i++) {
+		const struct ife17x_bf_roi *r = &bf->rois[i];
+
+		if (r->left < dx + 76 || r->left - dx + r->width > meta->width - 12 ||
+		    r->top + r->height > meta->height - 4 ||
+		    r->width > meta->width / 2 || r->height > meta->height / 2)
+			return false;
+	}
+	return true;
+}
+
+/*
+ * Program the focus statistics. The ROI and gamma tables go to the banks not
+ * in use, which the configuration register selects from the next register
+ * update on.
+ */
+static void ife_bf_program(struct vfe_pix_meta *meta, const struct ife17x_params_bf *bf,
+			   unsigned int first, unsigned int count, u32 dx)
+{
+	struct vfe_device *vfe = meta->vfe;
+	u8 bank = !meta->bf_bank;
+	u32 cfg = BF_CFG_H1_IIR | BF_CFG_V_IIR;
+	unsigned int i;
+	u32 r[5];
+
+	if (bf->green)
+		cfg |= BF_CFG_GREEN;
+	if (bf->gamma_enable)
+		cfg |= BF_CFG_GAMMA;
+	if (bank)
+		cfg |= BF_CFG_GAMMA_BANK | BF_CFG_ROI_BANK;
+
+	/* No luma conversion, FIR or downscaler */
+	for (i = 0; i < 2; i++)
+		writel_relaxed(0, vfe->base + VFE_BF_LUMA(i));
+	for (i = 0; i < 4; i++)
+		writel_relaxed(0, vfe->base + VFE_BF_FIR(i));
+	for (i = 0; i < 6; i++)
+		writel_relaxed(0, vfe->base + VFE_BF_SCALE(i));
+
+	ife_bf_iir(bf->h1.iir, r);
+	for (i = 0; i < 5; i++)
+		writel_relaxed(r[i], vfe->base + VFE_BF_H1_IIR(i));
+	ife_bf_iir(bf->v.iir, r);
+	for (i = 0; i < 5; i++)
+		writel_relaxed(r[i], vfe->base + vfe_bf_v_iir[i]);
+	writel_relaxed(bf->h1.shift | bf->v.shift << 16, vfe->base + VFE_BF_SHIFT);
+	ife_bf_coring(vfe, VFE_BF_H1_CORING_THR, VFE_BF_H1_CORING(0), &bf->h1);
+	ife_bf_coring(vfe, VFE_BF_V_CORING_THR, VFE_BF_V_CORING(0), &bf->v);
+	writel_relaxed(bf->h1.coring_gain, vfe->base + VFE_BF_H1_CORING_GAIN);
+	writel_relaxed(bf->v.coring_gain, vfe->base + VFE_BF_V_CORING_GAIN);
+	writel_relaxed(32 << 16 | 64, vfe->base + VFE_BF_ACTIVE_START);
+	writel_relaxed((meta->height - 32) << 16 | (meta->width - 64),
+		       vfe->base + VFE_BF_ACTIVE_END);
+
+	/*
+	 * ROI table: an empty entry, the regions, an empty entry. A region:
+	 * [12:0] height - 1, [25:14] width - 1, [40:27] top, [53:41] left in
+	 * the input of this IFE, [62:54] its index in the whole list, which
+	 * the record of the region carries.
+	 */
+	writel_relaxed((VFE_BF_ROI_DMI_BANK | bank) | DMI_CFG_AUTO_INC,
+		       vfe->base + VFE_DMI_CFG);
+	writel_relaxed(0, vfe->base + VFE_DMI_ADDR);
+	ife_dmi_write64(vfe, 0);
+	for (i = first; i < first + count; i++) {
+		const struct ife17x_bf_roi *roi = &bf->rois[i];
+
+		ife_dmi_write64(vfe, (u64)(roi->height - 1) |
+				     (u64)(roi->width - 1) << 14 |
+				     (u64)roi->top << 27 |
+				     (u64)(roi->left - dx) << 41 |
+				     (u64)i << 54);
+	}
+	ife_dmi_write64(vfe, 0);
+
+	/* Gamma: each point with the slope to the next, the last one to 0x8000 */
+	if (bf->gamma_enable) {
+		writel_relaxed((VFE_BF_GAMMA_DMI_BANK | bank) | DMI_CFG_AUTO_INC,
+			       vfe->base + VFE_DMI_CFG);
+		writel_relaxed(0, vfe->base + VFE_DMI_ADDR);
+		for (i = 0; i < IFE17X_BF_GAMMA_POINTS; i++) {
+			int node = bf->gamma[i];
+			int next = i < IFE17X_BF_GAMMA_POINTS - 1 ? bf->gamma[i + 1] : 0x8000;
+			int slope = clamp(next - node, -0x2000, 0x1fff);
+
+			writel_relaxed(node | ((u32)slope & 0x3fff) << 14,
+				       vfe->base + VFE_DMI_DATA_LO);
+		}
+	}
+	writel_relaxed(0, vfe->base + VFE_DMI_CFG);
+
+	writel_relaxed(cfg, vfe->base + VFE_BF_CFG);
+	meta->bf_bank = bank;
+}
+
+static void ife_params_bf(struct vfe_pix_meta *meta, union ife_params_block block)
+{
+	const struct ife17x_params_bf *bf = block.bf;
+	unsigned int first = 0, count, max = IFE17X_BF_MAX_ROIS;
+	u32 dx = 0;
+
+	/* A disabled block may be its header alone */
+	if (ife_block_disabled(block)) {
+		ife_stats_enable(meta, STATS_EN_BF, false);
+		return;
+	}
+
+	count = bf->num_rois;
+
+	/*
+	 * Dual IFE: the master measures the left stripe's part of the list,
+	 * the slave the right stripe's in its own input columns.
+	 */
+	if (meta->dual_slave) {
+		count = bf->num_left;
+		max = IFE17X_BF_DUAL_LEFT_MAX;
+	} else if (meta->dual_master) {
+		first = bf->num_left;
+		count = bf->num_rois - bf->num_left;
+		max = IFE17X_BF_DUAL_RIGHT_MAX;
+		dx = meta->frame_x;
+	} else if (bf->num_left) {
+		dev_warn_ratelimited(meta->vfe->camss->dev,
+				     "VFE%d: focus regions split for two IFEs\n",
+				     meta->vfe->id);
+		ife_stats_enable(meta, STATS_EN_BF, false);
+		return;
+	}
+
+	if (!count) {
+		ife_stats_enable(meta, STATS_EN_BF, false);
+		return;
+	}
+
+	if (count > max || !ife_bf_fits(meta, bf, first, count, dx)) {
+		dev_warn_ratelimited(meta->vfe->camss->dev,
+				     "VFE%d: focus regions outside the %ux%u input\n",
+				     meta->vfe->id, meta->width, meta->height);
+		ife_stats_enable(meta, STATS_EN_BF, false);
+		return;
+	}
+
+	/* The tables take a few hundred writes: skip them when nothing changes */
+	if (!meta->bf_valid || memcmp(&meta->bf, bf, sizeof(*bf))) {
+		ife_bf_program(meta, bf, first, count, dx);
+		meta->bf = *bf;
+		meta->bf_valid = true;
+	}
+	ife_stats_enable(meta, STATS_EN_BF, true);
 }
 
 static const ife_params_handler ife_params_handlers[] = {
@@ -408,6 +694,7 @@ static const ife_params_handler ife_params_handlers[] = {
 	[IFE17X_PARAMS_BLOCK_GAMMA] = ife_params_gamma,
 	[IFE17X_PARAMS_BLOCK_AWB_BG] = ife_params_awb_bg,
 	[IFE17X_PARAMS_BLOCK_PDPC] = ife_params_pdpc,
+	[IFE17X_PARAMS_BLOCK_BF] = ife_params_bf,
 };
 
 static const struct v4l2_isp_params_block_type_info ife_params_block_types[] = {
@@ -417,6 +704,7 @@ static const struct v4l2_isp_params_block_type_info ife_params_block_types[] = {
 	[IFE17X_PARAMS_BLOCK_GAMMA] = { .size = sizeof(struct ife17x_params_gamma) },
 	[IFE17X_PARAMS_BLOCK_AWB_BG] = { .size = sizeof(struct ife17x_params_awb_bg) },
 	[IFE17X_PARAMS_BLOCK_PDPC] = { .size = sizeof(struct ife17x_params_pdpc) },
+	[IFE17X_PARAMS_BLOCK_BF] = { .size = sizeof(struct ife17x_params_bf) },
 };
 
 static_assert(ARRAY_SIZE(ife_params_handlers) == ARRAY_SIZE(ife_params_block_types));
@@ -472,20 +760,48 @@ static void ife_params_scan_awb(struct vfe_pix_meta *meta,
  * Statistics write master
  */
 
-static void ife_stats_set_addr(struct vfe_pix_meta *meta, dma_addr_t addr)
+/* Point the write masters @wms at a statistics buffer for the next frame */
+static void ife_stats_set_addr(struct vfe_pix_meta *meta, dma_addr_t addr, u32 wms)
 {
 	struct vfe_device *vfe = meta->vfe;
 
-	writel_relaxed(lower_32_bits(addr), vfe->base + VFE_BUS_WM_IMAGE_ADDR(VFE_WM_AWB_BG));
-	writel_relaxed(IFE_STATS_SIZE, vfe->base + VFE_BUS_WM_FRAME_INC(VFE_WM_AWB_BG));
+	/*
+	 * Each address queues for one frame: a write master gets one only for
+	 * a frame it writes.
+	 */
+	if (wms & BIT(VFE_WM_AWB_BG)) {
+		writel_relaxed(lower_32_bits(addr),
+			       vfe->base + VFE_BUS_WM_IMAGE_ADDR(VFE_WM_AWB_BG));
+		writel_relaxed(IFE_STATS_SIZE, vfe->base + VFE_BUS_WM_FRAME_INC(VFE_WM_AWB_BG));
 
-	/* Dual IFE: the slave's grid goes after the master's */
-	if (meta->dual_slave) {
-		void __iomem *s = meta->dual_slave->vfe->base;
+		/*
+		 * Dual IFE: the slave's grid goes after the master's, and its
+		 * focus records to their fixed slot, after the header it
+		 * writes before them.
+		 */
+		if (meta->dual_slave) {
+			void __iomem *s = meta->dual_slave->vfe->base;
 
-		writel_relaxed(lower_32_bits(addr) + meta->slave_stats_off,
-			       s + VFE_BUS_WM_IMAGE_ADDR(VFE_WM_AWB_BG));
-		writel_relaxed(IFE_STATS_SIZE, s + VFE_BUS_WM_FRAME_INC(VFE_WM_AWB_BG));
+			writel_relaxed(lower_32_bits(addr) + meta->slave_stats_off,
+				       s + VFE_BUS_WM_IMAGE_ADDR(VFE_WM_AWB_BG));
+			writel_relaxed(IFE_STATS_SIZE, s + VFE_BUS_WM_FRAME_INC(VFE_WM_AWB_BG));
+
+			if (meta->dual_slave->stats_en & STATS_EN_BF) {
+				writel_relaxed(lower_32_bits(addr) +
+					       offsetof(struct ife17x_stats_buffer, bf_header) +
+					       IFE17X_BF_DUAL_RIGHT *
+					       sizeof(struct ife17x_bf_record),
+					       s + VFE_BUS_WM_IMAGE_ADDR(VFE_WM_BF));
+				writel_relaxed(IFE_STATS_SIZE,
+					       s + VFE_BUS_WM_FRAME_INC(VFE_WM_BF));
+			}
+		}
+	}
+	if (wms & BIT(VFE_WM_BF)) {
+		writel_relaxed(lower_32_bits(addr) +
+			       offsetof(struct ife17x_stats_buffer, bf_header),
+			       vfe->base + VFE_BUS_WM_IMAGE_ADDR(VFE_WM_BF));
+		writel_relaxed(IFE_STATS_SIZE, vfe->base + VFE_BUS_WM_FRAME_INC(VFE_WM_BF));
 	}
 }
 
@@ -510,6 +826,7 @@ static void ife_stats_dual_collect(struct vfe_pix_meta *meta, u64 ts)
 		memmove(&meta->held[i], &meta->held[i + 1],
 			(meta->nheld - i) * sizeof(meta->held[0]));
 		vb2_buffer_done(&buf->vb.vb2_buf, ok ? VB2_BUF_STATE_DONE : VB2_BUF_STATE_ERROR);
+		wake_up(&meta->stats_wq);
 	}
 }
 
@@ -521,35 +838,104 @@ static void ife_dual_end(struct vfe_pix_meta *meta)
 	if (meta->dual_slave)
 		meta->dual_slave->dual_master = NULL;
 	meta->dual_slave = NULL;
+	/* A statistics stop may wait for the held buffers */
+	wake_up(&meta->stats_wq);
 }
 
-/* Take the next queued stats buffer as the write target; lock held */
-static void ife_stats_next(struct vfe_pix_meta *meta)
+/*
+ * Settle the statistics of the next frame: the next queued buffer if the frame
+ * belongs to a request, else the scratch buffer, and queue the addresses of the
+ * write masters its setup turns on. Once per frame, after its parameters; lock
+ * held.
+ */
+static void ife_stats_settle(struct vfe_pix_meta *meta, bool written)
 {
-	struct ife_stats_buf *buf;
+	struct ife_stats_buf *buf = NULL;
 
-	buf = list_first_entry_or_null(&meta->stats_queue, struct ife_stats_buf, queue);
-	if (buf)
-		list_del(&buf->queue);
-	meta->stats_cur = buf;
-	ife_stats_set_addr(meta, buf ? buf->addr : meta->scratch_addr);
+	if (meta->next_set)
+		return;
+	if (written) {
+		buf = list_first_entry_or_null(&meta->stats_queue, struct ife_stats_buf, queue);
+		if (buf)
+			list_del(&buf->queue);
+	}
+	meta->stats_next = buf;
+	meta->next_wms = ife_stats_wms(meta);
+	meta->next_set = true;
+	ife_stats_set_addr(meta, buf ? buf->addr : meta->scratch_addr, meta->next_wms);
+}
+
+/* A statistics buffer is complete, or failed; lock held */
+static void ife_stats_finish(struct vfe_pix_meta *meta, struct ife_stats_buf *buf, bool ok)
+{
+	vb2_set_plane_payload(&buf->vb.vb2_buf, 0, IFE_STATS_SIZE);
+
+	/* Dual IFE: wait for the slave's grid of the same frame */
+	if (ok && meta->dual_slave &&
+	    meta->slave_stats_ts + VFE_DUAL_MATCH_NS <= ktime_get_ns()) {
+		if (meta->nheld == ARRAY_SIZE(meta->held)) {
+			struct ife_stats_buf *old = meta->held[0].buf;
+
+			meta->nheld--;
+			memmove(&meta->held[0], &meta->held[1],
+				meta->nheld * sizeof(meta->held[0]));
+			vb2_buffer_done(&old->vb.vb2_buf, VB2_BUF_STATE_ERROR);
+		}
+		meta->held[meta->nheld].buf = buf;
+		meta->held[meta->nheld].ts = buf->vb.vb2_buf.timestamp;
+		meta->nheld++;
+		wake_up(&meta->stats_wq);
+		return;
+	}
+
+	vb2_buffer_done(&buf->vb.vb2_buf, ok ? VB2_BUF_STATE_DONE : VB2_BUF_STATE_ERROR);
+	wake_up(&meta->stats_wq);
+}
+
+/* Give the buffers being written back to the queue, unused; lock held */
+static void ife_stats_return(struct vfe_pix_meta *meta)
+{
+	/* Back to the head of the queue, the older one first */
+	if (meta->stats_next) {
+		list_add(&meta->stats_next->queue, &meta->stats_queue);
+		meta->stats_next = NULL;
+	}
+	if (meta->stats_cur) {
+		list_add(&meta->stats_cur->queue, &meta->stats_queue);
+		meta->stats_cur = NULL;
+	}
+	meta->next_set = false;
 }
 
 static void ife_stats_wm_init(struct vfe_pix_meta *meta)
 {
+	static const u8 wms[] = { VFE_WM_BF, VFE_WM_AWB_BG };
 	struct vfe_device *vfe = meta->vfe;
-	u8 wm = VFE_WM_AWB_BG;
+	unsigned int i;
 
-	writel_relaxed(0, vfe->base + VFE_BUS_WM_IRQ_SUBSAMPLE_PERIOD(wm));
-	writel_relaxed(1, vfe->base + VFE_BUS_WM_IRQ_SUBSAMPLE_PATTERN(wm));
-	writel_relaxed(0, vfe->base + VFE_BUS_WM_FRAMEDROP_PERIOD(wm));
-	writel_relaxed(1, vfe->base + VFE_BUS_WM_FRAMEDROP_PATTERN(wm));
-	writel_relaxed(0xf, vfe->base + VFE_BUS_WM_BURST_LIMIT(wm));
-	writel_relaxed(0, vfe->base + VFE_BUS_WM_BUFFER_WIDTH_CFG(wm));
-	writel_relaxed(0, vfe->base + VFE_BUS_WM_BUFFER_HEIGHT_CFG(wm));
-	writel_relaxed(PACKER_FMT_PLAIN_64, vfe->base + VFE_BUS_WM_PACKER_CFG(wm));
-	ife_stats_next(meta);
-	writel_relaxed(WM_CFG_FRAME_BASED, vfe->base + VFE_BUS_WM_CFG(wm));
+	for (i = 0; i < ARRAY_SIZE(wms); i++) {
+		u8 wm = wms[i];
+
+		writel_relaxed(0, vfe->base + VFE_BUS_WM_IRQ_SUBSAMPLE_PERIOD(wm));
+		writel_relaxed(1, vfe->base + VFE_BUS_WM_IRQ_SUBSAMPLE_PATTERN(wm));
+		writel_relaxed(0, vfe->base + VFE_BUS_WM_FRAMEDROP_PERIOD(wm));
+		writel_relaxed(1, vfe->base + VFE_BUS_WM_FRAMEDROP_PATTERN(wm));
+		writel_relaxed(0xf, vfe->base + VFE_BUS_WM_BURST_LIMIT(wm));
+		writel_relaxed(0, vfe->base + VFE_BUS_WM_BUFFER_WIDTH_CFG(wm));
+		writel_relaxed(0, vfe->base + VFE_BUS_WM_BUFFER_HEIGHT_CFG(wm));
+		writel_relaxed(PACKER_FMT_PLAIN_64, vfe->base + VFE_BUS_WM_PACKER_CFG(wm));
+	}
+	/* Frame 0 */
+	meta->next_set = false;
+	meta->next_got = 0;
+	ife_stats_settle(meta, true);
+	meta->stats_cur = meta->stats_next;
+	meta->cur_wms = meta->next_wms;
+	meta->cur_got = 0;
+	meta->stats_next = NULL;
+	meta->next_set = false;
+	for (i = 0; i < ARRAY_SIZE(wms); i++)
+		writel_relaxed(WM_CFG_FRAME_BASED, vfe->base + VFE_BUS_WM_CFG(wms[i]));
 }
 
 /* -----------------------------------------------------------------------------
@@ -571,6 +957,7 @@ void vfe17x_meta_start(struct vfe_device *vfe, u32 width, u32 height)
 	meta->width = width;
 	meta->height = height;
 	meta->frame = 0;
+	meta->wedged = false;
 	meta->next_written = true;
 	meta->join_open = false;
 	meta->stripe_x = 0;
@@ -606,7 +993,11 @@ void vfe17x_meta_start(struct vfe_device *vfe, u32 width, u32 height)
 	meta->gamma_bank = 0;
 	/* The VFE was reset: the mask bank must be written again */
 	meta->pdpc_mask_valid = false;
-	writel_relaxed(CAMIF_EPOCH_CFG, vfe->base + VFE_CAMIF_EPOCH_IRQ);
+	/* Likewise the focus statistics, and no statistics are on */
+	meta->bf_valid = false;
+	meta->bf_bank = 0;
+	meta->stats_en = 0;
+	writel_relaxed(CAMIF_EPOCH_CFG(height), vfe->base + VFE_CAMIF_EPOCH_IRQ);
 
 	if (meta->awb_bg_pending) {
 		ife_awb_bg_program(meta, &meta->awb_bg);
@@ -631,12 +1022,18 @@ void vfe17x_meta_stop(struct vfe_device *vfe)
 
 	spin_lock_irqsave(&meta->lock, flags);
 	meta->running = false;
-	/* The master may still write the current buffer: give it back unused */
-	if (meta->stats_cur) {
-		list_add(&meta->stats_cur->queue, &meta->stats_queue);
-		meta->stats_cur = NULL;
-	}
+	/*
+	 * Without the reset, when another line keeps the VFE, the statistics
+	 * would go on: stop them and their write masters before their
+	 * buffers go back to the queue.
+	 */
+	ife_stats_enable(meta, STATS_EN_AWB_BG | STATS_EN_BF, false);
+	writel_relaxed(REG_UPDATE_PIX, vfe->base + VFE_REG_UPDATE_CMD);
+	writel_relaxed(0, vfe->base + VFE_BUS_WM_CFG(VFE_WM_BF));
+	writel_relaxed(0, vfe->base + VFE_BUS_WM_CFG(VFE_WM_AWB_BG));
+	ife_stats_return(meta);
 	ife_dual_end(meta);
+	wake_up(&meta->stats_wq);
 	spin_unlock_irqrestore(&meta->lock, flags);
 
 	/* Dual IFE slave: leave the master's pairing */
@@ -654,9 +1051,19 @@ void vfe17x_meta_stop(struct vfe_device *vfe)
 void vfe17x_meta_fatal(struct vfe_device *vfe)
 {
 	struct vfe_pix_meta *meta = vfe->pix_meta;
+	unsigned long flags;
 
 	if (!meta)
 		return;
+
+	/*
+	 * Its frames will not end: a statistics stop need not wait for them,
+	 * the pixel path stop resets the VFE.
+	 */
+	spin_lock_irqsave(&meta->lock, flags);
+	meta->wedged = true;
+	wake_up(&meta->stats_wq);
+	spin_unlock_irqrestore(&meta->lock, flags);
 
 	if (vb2_is_streaming(&meta->stats_q))
 		vb2_queue_error(&meta->stats_q);
@@ -672,23 +1079,46 @@ void vfe17x_meta_fatal(struct vfe_device *vfe)
 bool vfe17x_meta_running(struct vfe_device *vfe)
 {
 	struct vfe_pix_meta *meta = vfe->pix_meta;
+	unsigned long flags;
 	bool running;
 
 	if (!meta)
 		return false;
 
-	spin_lock(&meta->lock);
+	spin_lock_irqsave(&meta->lock, flags);
 	running = meta->running;
-	spin_unlock(&meta->lock);
+	spin_unlock_irqrestore(&meta->lock, flags);
 
 	return running;
 }
 
+/* Time between the last two epochs 0 of the pixel path, 0 if unknown */
+u64 vfe17x_meta_period_ns(struct vfe_device *vfe)
+{
+	struct vfe_pix_meta *meta = vfe->pix_meta;
+	unsigned long flags;
+	u64 period;
+
+	if (!meta)
+		return 0;
+
+	spin_lock_irqsave(&meta->lock, flags);
+	period = meta->period_ns;
+	spin_unlock_irqrestore(&meta->lock, flags);
+
+	return period;
+}
+
+/* As vfe17x_meta_running(), with the lock held (vfe17x_meta_lock()) */
+bool vfe17x_meta_running_locked(struct vfe_device *vfe)
+{
+	return vfe->pix_meta && vfe->pix_meta->running;
+}
+
 /*
- * A buffer joining the next frame after its epoch (vfe17x_queue_buffer())
- * decides under the meta lock, which the end of the frame takes to settle
- * the statistics: the two do not interleave. Output lock held, interrupts
- * off.
+ * A buffer joining the next frame after epoch 0 (vfe17x_queue_buffer())
+ * decides under the meta lock, which epoch 1 takes to settle the frame: the
+ * two do not interleave. Output lock held, interrupts off.
  */
 void vfe17x_meta_lock(struct vfe_device *vfe)
 {
@@ -702,7 +1132,7 @@ void vfe17x_meta_unlock(struct vfe_device *vfe)
 		spin_unlock(&vfe->pix_meta->lock);
 }
 
-/* From an epoch until that frame ends, the next frame can still be joined */
+/* From epoch 0 to epoch 1 of a frame, the next frame can still be joined */
 bool vfe17x_meta_join_open_locked(struct vfe_device *vfe)
 {
 	struct vfe_pix_meta *meta = vfe->pix_meta;
@@ -711,21 +1141,23 @@ bool vfe17x_meta_join_open_locked(struct vfe_device *vfe)
 }
 
 /*
- * The image path got a buffer for the next frame after its epoch, before the
- * end of the current frame: the next frame belongs to a request after all.
- * Apply its parameters now, before the next frame starts; its statistics
- * buffer is picked at the end of this frame. Returns true if registers need
- * a PIX register update.
+ * The image path got a buffer for the next frame after epoch 0, before epoch
+ * 1 of the current frame: the next frame belongs to a request after all.
+ * Apply its parameters and queue its statistics buffer now, before the next
+ * frame starts. Returns true if registers need a PIX register update.
  */
 bool vfe17x_meta_join_locked(struct vfe_device *vfe)
 {
 	struct vfe_pix_meta *meta = vfe->pix_meta;
+	bool applied;
 
 	if (!vfe17x_meta_join_open_locked(vfe) || meta->next_written)
 		return false;
 
 	meta->next_written = true;
-	return ife_params_apply_next(meta, meta->frame);
+	applied = ife_params_apply_next(meta, meta->frame);
+	ife_stats_settle(meta, true);
+	return applied;
 }
 
 /*
@@ -747,13 +1179,52 @@ bool vfe17x_meta_epoch(struct vfe_device *vfe, bool next_written)
 
 	spin_lock(&meta->lock);
 	running = meta->running;
+	/* A dual IFE slave's statistics go with the master's frames */
+	if (running && meta->frame && !meta->dual_master) {
+		/* The frame before this one is over, complete or not */
+		if (meta->stats_cur) {
+			dev_dbg(vfe->camss->dev,
+				"VFE%d: frame %u statistics incomplete, write masters %#x missing\n",
+				vfe->id, meta->frame - 1, meta->cur_wms & ~meta->cur_got);
+			ife_stats_finish(meta, meta->stats_cur, false);
+		}
+		/*
+		 * Not settled by epoch 1: the frame started without statistics
+		 * addresses, and the write masters skip it. An address queued
+		 * now would go to the frame after, and every later one too.
+		 */
+		if (!meta->next_set) {
+			if (meta->stats_en && vb2_is_streaming(&meta->stats_q))
+				dev_warn_ratelimited(vfe->camss->dev,
+						     "VFE%d: frame %u statistics not settled in time\n",
+						     vfe->id, meta->frame);
+			meta->stats_next = NULL;
+			meta->next_wms = 0;
+		}
+		meta->stats_cur = meta->stats_next;
+		meta->cur_wms = meta->next_wms;
+		meta->cur_got = meta->next_got;
+		meta->stats_next = NULL;
+		meta->next_got = 0;
+		meta->next_set = false;
+	}
 	if (running) {
 		ev.u.frame_sync.frame_sequence = meta->frame;
+		{
+			u64 now = ktime_get_ns();
+
+			if (meta->frame)
+				meta->period_ns = now - meta->epoch_ns;
+			meta->epoch_ns = now;
+		}
 		meta->frame++;
 		meta->next_written = next_written;
 		meta->join_open = true;
-		if (next_written)
+		if (next_written) {
 			applied = ife_params_apply_next(meta, meta->frame);
+			if (!meta->dual_master)
+				ife_stats_settle(meta, true);
+		}
 	}
 	spin_unlock(&meta->lock);
 
@@ -762,6 +1233,30 @@ bool vfe17x_meta_epoch(struct vfe_device *vfe, bool next_written)
 		v4l2_event_queue(vfe->line[VFE_LINE_PIX].subdev.devnode, &ev);
 
 	return applied;
+}
+
+/*
+ * Epoch 1, three quarters into the frame: the next frame is settled. No
+ * buffer joins it any more; without one it writes its statistics to the
+ * scratch buffer. @late: the next frame already started (its SOF is in the
+ * same interrupt), so addresses queued now would go to the frame after it:
+ * queue none, the write masters skip the frame.
+ */
+void vfe17x_meta_epoch1(struct vfe_device *vfe, bool late)
+{
+	struct vfe_pix_meta *meta = vfe->pix_meta;
+
+	if (!meta)
+		return;
+
+	spin_lock(&meta->lock);
+	/* Before epoch 0 of the first frame, it is a frame before the stream */
+	if (meta->running && meta->frame) {
+		meta->join_open = false;
+		if (!meta->dual_master && !late)
+			ife_stats_settle(meta, false);
+	}
+	spin_unlock(&meta->lock);
 }
 
 /*
@@ -777,14 +1272,15 @@ bool vfe17x_meta_epoch(struct vfe_device *vfe, bool next_written)
 bool vfe17x_meta_frame_started(struct vfe_device *vfe)
 {
 	struct vfe_pix_meta *meta = vfe->pix_meta;
+	unsigned long flags;
 	bool started;
 
 	if (!meta)
 		return true;
 
-	spin_lock(&meta->lock);
+	spin_lock_irqsave(&meta->lock, flags);
 	started = meta->running && meta->frame;
-	spin_unlock(&meta->lock);
+	spin_unlock_irqrestore(&meta->lock, flags);
 
 	return started;
 }
@@ -793,14 +1289,15 @@ bool vfe17x_meta_frame_started(struct vfe_device *vfe)
 bool vfe17x_meta_before_first_frame(struct vfe_device *vfe)
 {
 	struct vfe_pix_meta *meta = vfe->pix_meta;
+	unsigned long flags;
 	bool before;
 
 	if (!meta)
 		return false;
 
-	spin_lock(&meta->lock);
+	spin_lock_irqsave(&meta->lock, flags);
 	before = meta->running && !meta->frame;
-	spin_unlock(&meta->lock);
+	spin_unlock_irqrestore(&meta->lock, flags);
 
 	return before;
 }
@@ -808,29 +1305,33 @@ bool vfe17x_meta_before_first_frame(struct vfe_device *vfe)
 void vfe17x_meta_sequence(struct vfe_device *vfe, u32 *sequence)
 {
 	struct vfe_pix_meta *meta = vfe->pix_meta;
+	unsigned long flags;
 
 	if (!meta)
 		return;
 
-	spin_lock(&meta->lock);
+	spin_lock_irqsave(&meta->lock, flags);
 	if (meta->running && meta->frame)
 		*sequence = meta->frame - 1;
-	spin_unlock(&meta->lock);
+	spin_unlock_irqrestore(&meta->lock, flags);
 }
 
-/* Bus interrupt: complete the stats buffer of a finished frame */
+/* Bus interrupt: statistics write masters done (see struct vfe_pix_meta) */
 void vfe17x_meta_bus(struct vfe_device *vfe, u32 bus_status1)
 {
 	struct vfe_pix_meta *meta = vfe->pix_meta;
+	u32 wms = bus_status1 & IFE_STATS_WMS;
 	struct vfe_pix_meta *master;
 	struct ife_stats_buf *done;
 
-	if (!meta || !(bus_status1 & BIT(VFE_WM_AWB_BG)))
+	if (!meta || !wms)
 		return;
 
 	/* Dual IFE slave: its grid went into the master's buffer */
 	master = READ_ONCE(meta->dual_master);
 	if (master) {
+		if (!(wms & BIT(VFE_WM_AWB_BG)))
+			return;
 		spin_lock(&master->lock);
 		if (master->dual_slave == meta) {
 			u64 ts = ktime_get_ns();
@@ -847,58 +1348,38 @@ void vfe17x_meta_bus(struct vfe_device *vfe, u32 bus_status1)
 		spin_unlock(&meta->lock);
 		return;
 	}
-	done = meta->stats_cur;
-	/* The frame ends: whether the next one belongs to a request is settled */
-	meta->join_open = false;
 	/*
-	 * Before the first epoch: the grid of a frame that began before the
-	 * stream, not one of its frames. Have the buffer written again, by
-	 * the first frame, rather than number this grid as frame 0.
+	 * Before the first epoch: statistics of a frame that began before the
+	 * stream, not one of its frames. Have those masters write the buffer
+	 * again, by the first frame, rather than number them as frame 0.
 	 */
-	if (done && !meta->frame) {
-		ife_stats_set_addr(meta, done->addr);
+	if (!meta->frame) {
+		ife_stats_set_addr(meta, meta->stats_cur ? meta->stats_cur->addr :
+				   meta->scratch_addr, wms);
 		spin_unlock(&meta->lock);
 		dev_dbg(vfe->camss->dev,
 			"VFE%d: statistics before the first frame, buffer reused\n", vfe->id);
 		return;
 	}
-	/* A frame the image path skips writes its grid to the scratch buffer */
-	if (meta->next_written) {
-		ife_stats_next(meta);
-	} else {
-		meta->stats_cur = NULL;
-		ife_stats_set_addr(meta, meta->scratch_addr);
-	}
-	/* Dual IFE: wait for the slave's grid of the same frame */
-	if (done && meta->dual_slave &&
-	    meta->slave_stats_ts + VFE_DUAL_MATCH_NS <= ktime_get_ns()) {
-		if (meta->nheld == ARRAY_SIZE(meta->held)) {
-			struct ife_stats_buf *old = meta->held[0].buf;
 
-			meta->nheld--;
-			memmove(&meta->held[0], &meta->held[1],
-				meta->nheld * sizeof(meta->held[0]));
-			vb2_buffer_done(&old->vb.vb2_buf, VB2_BUF_STATE_ERROR);
-		}
-		done->vb.sequence = meta->frame ? meta->frame - 1 : 0;
-		done->vb.vb2_buf.timestamp = ktime_get_ns();
-		vb2_set_plane_payload(&done->vb.vb2_buf, 0, IFE_STATS_SIZE);
-		meta->held[meta->nheld].buf = done;
-		meta->held[meta->nheld].ts = done->vb.vb2_buf.timestamp;
-		meta->nheld++;
-		done = NULL;
-	}
-	if (done) {
+	/*
+	 * A write master already done with this frame is done with the next
+	 * one, whose epoch 0 is in the same interrupt.
+	 */
+	meta->next_got |= wms & meta->cur_got;
+	meta->cur_got |= wms;
+
+	done = meta->stats_cur;
+	if (done && (meta->cur_got & meta->cur_wms) == meta->cur_wms) {
+		meta->stats_cur = NULL;
 		/*
-		 * The grid of frame k completes at its end, after the epoch of
-		 * frame k and before that of frame k + 1: number it from the
-		 * epochs, so it matches the image even if the grid was turned
-		 * on after the stream start.
+		 * Frame k's statistics complete between epochs 0 of frames k
+		 * and k + 1: number them from the epochs, so they match the
+		 * image even if they were turned on after the stream start.
 		 */
-		done->vb.sequence = meta->frame ? meta->frame - 1 : 0;
+		done->vb.sequence = meta->frame - 1;
 		done->vb.vb2_buf.timestamp = ktime_get_ns();
-		vb2_set_plane_payload(&done->vb.vb2_buf, 0, IFE_STATS_SIZE);
-		vb2_buffer_done(&done->vb.vb2_buf, VB2_BUF_STATE_DONE);
+		ife_stats_finish(meta, done, true);
 	}
 	spin_unlock(&meta->lock);
 }
@@ -1025,11 +1506,170 @@ static void ife_params_buf_cleanup(struct vb2_buffer *vb)
 	buf->config = NULL;
 }
 
+static int ife_bf_check_filter(struct device *dev, const struct ife17x_bf_filter *f)
+{
+	unsigned int i;
+
+	if (f->shift > 15 || f->coring_gain > 1023 || f->coring_threshold > 0x1ffff ||
+	    f->reserved0 || memchr_inv(f->reserved, 0, sizeof(f->reserved)))
+		return -EINVAL;
+	for (i = 0; i < IFE17X_BF_CORING_POINTS; i++)
+		if (f->coring[i] > 31)
+			return -EINVAL;
+	return 0;
+}
+
+/*
+ * What the hardware takes, as the Windows driver checks it, short of the frame
+ * size: that one is checked when the block is applied.
+ */
+static int ife_bf_check(struct device *dev, const struct ife17x_params_bf *bf)
+{
+	unsigned int i, j, n;
+
+	if (!bf->num_rois || bf->num_rois > IFE17X_BF_MAX_ROIS || bf->num_left > bf->num_rois ||
+	    bf->green > 1 ||
+	    bf->gamma_enable > 1 || bf->reserved ||
+	    ife_bf_check_filter(dev, &bf->h1) || ife_bf_check_filter(dev, &bf->v)) {
+		dev_dbg(dev, "BF: invalid configuration\n");
+		return -EINVAL;
+	}
+	for (i = 0; i < IFE17X_BF_GAMMA_POINTS; i++) {
+		if (bf->gamma[i] > 0x3fff) {
+			dev_dbg(dev, "BF: invalid gamma point %u\n", i);
+			return -EINVAL;
+		}
+	}
+
+	for (i = 0; i < bf->num_rois; i++) {
+		const struct ife17x_bf_roi *r = &bf->rois[i];
+
+		/* Even, inside the fields of the ROI table */
+		if ((r->left | r->top | r->width | r->height) & 1 ||
+		    r->left < 76 || r->top < 36 || r->width < 6 || r->height < 8 ||
+		    r->width > 4096 || r->left + r->width > 8192 ||
+		    r->top + r->height > 16384) {
+			dev_dbg(dev, "BF: invalid region %u\n", i);
+			return -EINVAL;
+		}
+
+		/* In raster order of their ends, which are apart, in each part */
+		if (i && i != bf->num_left) {
+			const struct ife17x_bf_roi *p = &bf->rois[i - 1];
+			int pb = p->top + p->height, pr = p->left + p->width;
+			int rb = r->top + r->height, rr = r->left + r->width;
+
+			if (rb < pb || (rb == pb && rr <= pr) ||
+			    abs(rr - pr) < IFE_BF_END_SPACING) {
+				dev_dbg(dev, "BF: region %u out of order\n", i);
+				return -EINVAL;
+			}
+		}
+
+		for (j = 0, n = 0; j < bf->num_rois; j++) {
+			const struct ife17x_bf_roi *o = &bf->rois[j];
+
+			/* One IFE takes each part */
+			if (o->top == r->top && (j < bf->num_left) == (i < bf->num_left))
+				n++;
+			if (j != i && o->left < r->left + r->width &&
+			    r->left < o->left + o->width &&
+			    o->top < r->top + r->height &&
+			    r->top < o->top + o->height) {
+				dev_dbg(dev, "BF: regions %u and %u overlap\n", i, j);
+				return -EINVAL;
+			}
+		}
+		if (n > IFE_BF_ROIS_PER_ROW) {
+			dev_dbg(dev, "BF: more than %u regions start on row %u\n",
+				IFE_BF_ROIS_PER_ROW, r->top);
+			return -EINVAL;
+		}
+	}
+	return 0;
+}
+
+/* Ranges and reserved fields of the blocks other than BF */
+static int ife_params_check(struct device *dev, union ife_params_block block)
+{
+	unsigned int i, j;
+
+	switch (block.header->type) {
+	case IFE17X_PARAMS_BLOCK_BLS:
+		if (block.bls->offset > 8191 ||
+		    memchr_inv(block.bls->reserved, 0, sizeof(block.bls->reserved)))
+			goto invalid;
+		break;
+	case IFE17X_PARAMS_BLOCK_WB:
+		for (i = 0; i < 3; i++)
+			if (block.wb->gain[i] > 4095)
+				goto invalid;
+		if (block.wb->reserved)
+			goto invalid;
+		break;
+	case IFE17X_PARAMS_BLOCK_CCM:
+		for (i = 0; i < 3; i++) {
+			for (j = 0; j < 3; j++)
+				if (block.ccm->coeff[i][j] < -2048 || block.ccm->coeff[i][j] > 2047)
+					goto invalid;
+			if (block.ccm->offset[i] < -1024 || block.ccm->offset[i] > 1023)
+				goto invalid;
+		}
+		if (block.ccm->shift > 3 ||
+		    memchr_inv(block.ccm->reserved, 0, sizeof(block.ccm->reserved)))
+			goto invalid;
+		break;
+	case IFE17X_PARAMS_BLOCK_GAMMA:
+		for (i = 0; i < 3; i++) {
+			const u16 *t = block.gamma->curve[i];
+
+			for (j = 0; j < IFE17X_GAMMA_NODES; j++)
+				if (t[j] > (j < IFE17X_GAMMA_NODES - 1 ? 1023 : 1024))
+					goto invalid;
+			/* The LUT holds each step to the next node in 10 signed bits */
+			for (j = 0; j + 1 < IFE17X_GAMMA_NODES; j++)
+				if ((int)t[j + 1] - t[j] < -512 || (int)t[j + 1] - t[j] > 511)
+					goto invalid;
+		}
+		if (memchr_inv(block.gamma->reserved, 0, sizeof(block.gamma->reserved)))
+			goto invalid;
+		break;
+	case IFE17X_PARAMS_BLOCK_AWB_BG:
+		if (!block.awb_bg->h_num || block.awb_bg->h_num > IFE17X_AWB_BG_MAX_H ||
+		    !block.awb_bg->v_num || block.awb_bg->v_num > IFE17X_AWB_BG_MAX_V ||
+		    block.awb_bg->reserved)
+			goto invalid;
+		for (i = 0; i < 4; i++)
+			if (block.awb_bg->threshold[i] > 0x3fff)
+				goto invalid;
+		break;
+	case IFE17X_PARAMS_BLOCK_PDPC:
+		if (block.pdpc->black_level > 4095 || block.pdpc->reserved)
+			goto invalid;
+		for (i = 0; i < 2; i++)
+			if (block.pdpc->bp_offset[i] > 0x7fff ||
+			    block.pdpc->t2_bp_offset[i] > 0x7fff)
+				goto invalid;
+		for (i = 0; i < 4; i++)
+			if (block.pdpc->wb_ratio[i] > 0x1ffff)
+				goto invalid;
+		break;
+	case IFE17X_PARAMS_BLOCK_BF:
+		return ife_bf_check(dev, block.bf);
+	}
+	return 0;
+
+invalid:
+	dev_dbg(dev, "invalid parameters block of type %u\n", block.header->type);
+	return -EINVAL;
+}
+
 static int ife_params_buf_prepare(struct vb2_buffer *vb)
 {
 	struct vfe_pix_meta *meta = vb2_get_drv_priv(vb->vb2_queue);
 	struct ife_params_buf *buf = to_params_buf(to_vb2_v4l2_buffer(vb));
 	struct device *dev = meta->vfe->camss->dev;
+	size_t off = 0;
 	int ret;
 
 	ret = v4l2_isp_params_validate_buffer_size(dev, vb, IFE_PARAMS_SIZE);
@@ -1039,9 +1679,24 @@ static int ife_params_buf_prepare(struct vb2_buffer *vb)
 	/* Work on a copy userspace can no longer change */
 	memcpy(buf->config, vb2_plane_vaddr(vb, 0), vb2_get_plane_payload(vb, 0));
 
-	return v4l2_isp_params_validate_buffer(dev, vb, buf->config,
-					       ife_params_block_types,
-					       ARRAY_SIZE(ife_params_block_types));
+	ret = v4l2_isp_params_validate_buffer(dev, vb, buf->config,
+					      ife_params_block_types,
+					      ARRAY_SIZE(ife_params_block_types));
+	if (ret)
+		return ret;
+
+	/* The values of the enabled blocks; a disabled one may be a bare header */
+	while (off < buf->config->data_size) {
+		union ife_params_block block = { .data = &buf->config->data[off] };
+
+		if (!ife_block_disabled(block)) {
+			ret = ife_params_check(dev, block);
+			if (ret)
+				return ret;
+		}
+		off += block.header->size;
+	}
+	return 0;
 }
 
 static void ife_params_buf_queue(struct vb2_buffer *vb)
@@ -1117,24 +1772,76 @@ static void ife_stats_buf_queue(struct vb2_buffer *vb)
 	spin_unlock_irqrestore(&meta->lock, flags);
 }
 
-static void ife_stats_stop_streaming(struct vb2_queue *q)
+/* Whether the write masters are done with the driver's statistics buffers */
+static bool ife_stats_idle(struct vfe_pix_meta *meta)
 {
-	struct vfe_pix_meta *meta = vb2_get_drv_priv(q);
-	struct ife_stats_buf *buf, *tmp;
 	unsigned long flags;
+	bool idle;
 
 	spin_lock_irqsave(&meta->lock, flags);
-	if (meta->stats_cur) {
-		/* Point the master at the scratch buffer before giving it back */
-		if (meta->running)
-			ife_stats_set_addr(meta, meta->scratch_addr);
-		list_add(&meta->stats_cur->queue, &meta->stats_queue);
-		meta->stats_cur = NULL;
-	}
+	idle = !meta->running || meta->wedged ||
+	       (!meta->stats_cur && !meta->stats_next && !meta->nheld);
+	spin_unlock_irqrestore(&meta->lock, flags);
+
+	return idle;
+}
+
+/* Lock held: give every buffer the driver has back, failed */
+static void ife_stats_fail_all(struct vfe_pix_meta *meta)
+{
+	struct ife_stats_buf *buf, *tmp;
+
 	list_for_each_entry_safe(buf, tmp, &meta->stats_queue, queue) {
 		list_del(&buf->queue);
 		vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_ERROR);
 	}
+	while (meta->nheld) {
+		buf = meta->held[--meta->nheld].buf;
+		vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_ERROR);
+	}
+	/* The frames stay settled: their addresses are queued */
+	if (meta->stats_next) {
+		vb2_buffer_done(&meta->stats_next->vb.vb2_buf, VB2_BUF_STATE_ERROR);
+		meta->stats_next = NULL;
+	}
+	if (meta->stats_cur) {
+		vb2_buffer_done(&meta->stats_cur->vb.vb2_buf, VB2_BUF_STATE_ERROR);
+		meta->stats_cur = NULL;
+	}
+}
+
+static void ife_stats_stop_streaming(struct vb2_queue *q)
+{
+	struct vfe_pix_meta *meta = vb2_get_drv_priv(q);
+	struct device *dev = meta->vfe->camss->dev;
+	struct ife_stats_buf *buf, *tmp;
+	unsigned long flags;
+	u64 period_ns;
+	unsigned int ms;
+
+	/* Buffers the hardware has no address of go back at once */
+	spin_lock_irqsave(&meta->lock, flags);
+	list_for_each_entry_safe(buf, tmp, &meta->stats_queue, queue) {
+		list_del(&buf->queue);
+		vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_ERROR);
+	}
+	period_ns = meta->period_ns;
+	spin_unlock_irqrestore(&meta->lock, flags);
+	ms = clamp_t(u64, 3 * div_u64(period_ns, NSEC_PER_MSEC) + 100,
+		     IFE_STATS_DRAIN_MIN_MS, IFE_STATS_DRAIN_MAX_MS);
+
+	/*
+	 * While the pixel path runs, the write masters have the addresses of
+	 * up to two frames, and a dual IFE master's buffers may wait for the
+	 * slave's grid. Let those frames complete (later ones go to the
+	 * scratch buffer) before the memory goes back to userspace.
+	 */
+	if (!wait_event_timeout(meta->stats_wq, ife_stats_idle(meta), msecs_to_jiffies(ms)))
+		dev_warn(dev, "VFE%d: statistics buffers returned before their frames ended\n",
+			 meta->vfe->id);
+
+	spin_lock_irqsave(&meta->lock, flags);
+	ife_stats_fail_all(meta);
 	spin_unlock_irqrestore(&meta->lock, flags);
 }
 
@@ -1219,6 +1926,7 @@ int vfe17x_meta_register(struct vfe_device *vfe, struct v4l2_device *v4l2_dev)
 		return -ENOMEM;
 	meta->vfe = vfe;
 	spin_lock_init(&meta->lock);
+	init_waitqueue_head(&meta->stats_wq);
 	INIT_LIST_HEAD(&meta->params_queue);
 	INIT_LIST_HEAD(&meta->stats_queue);
 

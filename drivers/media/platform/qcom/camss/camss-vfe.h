@@ -382,6 +382,7 @@ int vfe_enable_output_v2(struct vfe_line *line);
  *
  * Return 0 on success or a negative error code otherwise
  */
+void vfe_queue_buffer_v2_locked(struct vfe_line *line, struct camss_buffer *buf);
 int vfe_queue_buffer_v2(struct camss_video *vid,
 			struct camss_buffer *buf);
 

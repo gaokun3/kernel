@@ -79,6 +79,7 @@
 #define VFE_IRQ_STATUS_0				(0x06c)
 #define		STATUS_0_CAMIF_SOF			BIT(0)
 #define		STATUS_0_CAMIF_EPOCH0			BIT(2)
+#define		STATUS_0_CAMIF_EPOCH1			BIT(3)
 #define		STATUS_0_CAMIF_REG_UPDATE		BIT(4)
 #define		STATUS_0_RDI_REG_UPDATE(n)		BIT((n) + 5)
 #define		STATUS_0_IMAGE_MASTER_PING_PONG(n)	BIT((n) + 8)
@@ -1157,8 +1158,14 @@ static void vfe17x_fatal_error(struct vfe_device *vfe)
 	first = !vfe->errors.fatal;
 	vfe->errors.fatal = true;
 	if (first) {
+		/*
+		 * Only the queues that stream or are starting: a dual IFE
+		 * slave's own video node is not used, its line writes the
+		 * master's buffers.
+		 */
 		for (i = 0; i < vfe->res->line_num; i++)
-			if (vfe->line[i].output.state == VFE_OUTPUT_ON)
+			if (vfe->line[i].output.state == VFE_OUTPUT_ON &&
+			    vb2_start_streaming_called(&vfe->line[i].video_out.vb2_q))
 				vb2_queue_error(&vfe->line[i].video_out.vb2_q);
 		if (vfe->dual.peer && !vfe->dual.master)
 			master = vfe->dual.peer;
@@ -1291,9 +1298,9 @@ static bool vfe17x_arm_next(struct vfe_device *vfe)
 }
 
 /*
- * Epoch k of the pixel path: settle the buffers of frame k + 1, as its
- * parameters go in now too. While the pixel path runs, buffers are queued
- * for a frame only here or, until the end of frame k, when they come
+ * Epoch 0 of frame k of the pixel path: settle the buffers of frame k + 1, as
+ * its parameters go in now too. While the pixel path runs, buffers are queued
+ * for a frame only here or, until epoch 1 of frame k, when they come
  * (vfe17x_queue_buffer()): a frame the image path skips for want of a buffer
  * then takes no request's buffers, and the parameters, statistics, image and
  * RDI buffers of a request stay on one frame. Returns whether the image path
@@ -1321,8 +1328,8 @@ static bool vfe17x_epoch_refill(struct vfe_device *vfe)
 
 /*
  * While the pixel path runs, a buffer goes to its line for the next frame
- * when that frame still lacks one and can still take it (until the end of
- * the current frame), and otherwise at the next epoch.
+ * when that frame still lacks one and can still take it (until epoch 1 of the
+ * current frame), and otherwise at the next epoch 0.
  */
 static int vfe17x_queue_buffer(struct camss_video *vid, struct camss_buffer *buf)
 {
@@ -1331,21 +1338,26 @@ static int vfe17x_queue_buffer(struct camss_video *vid, struct camss_buffer *buf
 	struct vfe_line *pix = &vfe->line[VFE_LINE_PIX];
 	unsigned long flags;
 
-	if (!vfe17x_meta_running(vfe))
-		return vfe_queue_buffer_v2(vid, buf);
-
+	/*
+	 * The meta lock is also taken by the VFE interrupt: interrupts off
+	 * (output lock) before it, and whether the pixel path runs is read
+	 * under it, so that a stream start or stop does not slip between.
+	 */
 	spin_lock_irqsave(&vfe->output_lock, flags);
-	vfe_buf_add_pending(&line->output, buf);
-	if (!(vfe->dual.peer && !vfe->dual.master)) {
-		vfe17x_meta_lock(vfe);
-		if (vfe17x_meta_join_open_locked(vfe)) {
+	vfe17x_meta_lock(vfe);
+	if (!vfe17x_meta_running_locked(vfe)) {
+		vfe_queue_buffer_v2_locked(line, buf);
+	} else {
+		vfe_buf_add_pending(&line->output, buf);
+		if (!(vfe->dual.peer && !vfe->dual.master) &&
+		    vfe17x_meta_join_open_locked(vfe)) {
 			bool was_next = pix->output.armed_next;
 
 			if (vfe17x_arm_next(vfe) && !was_next && vfe17x_meta_join_locked(vfe))
 				vfe_reg_update(vfe, VFE_LINE_PIX);
 		}
-		vfe17x_meta_unlock(vfe);
 	}
+	vfe17x_meta_unlock(vfe);
 	spin_unlock_irqrestore(&vfe->output_lock, flags);
 
 	return 0;
@@ -1392,8 +1404,12 @@ static irqreturn_t vfe_isr(int irq, void *dev)
 			      vfe_bus_status[0] & VFE_BUS_ERR_MASK_0,
 			      vfe_bus_status[2] & VFE_BUS_ERR_MASK_2);
 
-	if (status0 & BIT(9))
-		vfe17x_meta_bus(vfe, vfe_bus_status[1]);
+	/*
+	 * The bus status registers were read and cleared whatever status 0
+	 * said: a done that came after status 0 was read is in them too, and
+	 * would be lost if handled only with bit 9 of status 0.
+	 */
+	vfe17x_meta_bus(vfe, vfe_bus_status[1]);
 
 	for (i = VFE_LINE_RDI0; i < vfe->res->line_num; i++)
 		if (status0 & vfe_reg_update_done_bit(vfe, i))
@@ -1408,10 +1424,16 @@ static irqreturn_t vfe_isr(int irq, void *dev)
 			vfe->isr_ops.comp_done(vfe, i);
 
 	for (wm = 0; wm < MSM_VFE_IMAGE_MASTERS_NUM; wm++)
-		if (status0 & BIT(9))
-			if ((vfe_bus_status[1] & STATUS1_WM_CLIENT_BUF_DONE(wm)) &&
-			    !vfe_wm_is_pix(vfe, wm))
-				vfe->isr_ops.wm_done(vfe, wm);
+		if ((vfe_bus_status[1] & STATUS1_WM_CLIENT_BUF_DONE(wm)) &&
+		    !vfe_wm_is_pix(vfe, wm))
+			vfe->isr_ops.wm_done(vfe, wm);
+
+	/*
+	 * Epoch 1 of the pixel path: the next frame is settled. With the SOF
+	 * in the same status, the interrupt came after the next frame started.
+	 */
+	if (status0 & STATUS_0_CAMIF_EPOCH1)
+		vfe17x_meta_epoch1(vfe, status0 & STATUS_0_CAMIF_SOF);
 
 	/*
 	 * Epoch 0 of the pixel path: program the next frame's parameters.
@@ -1680,7 +1702,8 @@ static void vfe_isr_wm_done(struct vfe_device *vfe, u8 wm)
 		 * The write masters take one queued address per frame and skip
 		 * the frames they have none for, without a done interrupt.
 		 */
-		output->gen2.active_num--;
+		if (output->gen2.active_num)
+			output->gen2.active_num--;
 	}
 
 	/*
@@ -1749,6 +1772,8 @@ static int vfe17x_disable(struct vfe_line *line)
 	struct camss_buffer *done[VFE_DUAL_HELD];
 	unsigned int i, n = 0;
 	unsigned long flags;
+	bool last;
+	int ret;
 
 	if (vfe_line_has_pix_pipeline(vfe, line->id)) {
 		vfe17x_meta_stop(vfe);
@@ -1776,7 +1801,28 @@ static int vfe17x_disable(struct vfe_line *line)
 			vb2_buffer_done(&done[i]->vb.vb2_buf, VB2_BUF_STATE_ERROR);
 	}
 
-	return vfe_disable(line);
+	mutex_lock(&vfe->stream_lock);
+	last = vfe->stream_count == 1;
+	mutex_unlock(&vfe->stream_lock);
+
+	ret = vfe_disable(line);
+
+	/*
+	 * Another line keeps the VFE, so no reset stops this line's write
+	 * masters: disabled, they still finish the frame they write, into
+	 * buffers about to go back (an SMMU fault once freed, seen when a
+	 * killed client released the RAW node while the pixel path ran).
+	 * Let that frame end: two frame periods.
+	 */
+	if (!last) {
+		u64 period = vfe17x_meta_period_ns(vfe);
+		unsigned int ms = period ? clamp_t(u64, 2 * div_u64(period, NSEC_PER_MSEC),
+						   34, 500) : 100;
+
+		msleep(ms);
+	}
+
+	return ret;
 }
 
 const struct vfe_hw_ops vfe_ops_170 = {

@@ -155,11 +155,11 @@ struct camss {
 	void __iomem *csid_wrapper_base;
 	atomic_t ref_count;
 	int genpd_num;
-	/* Rail level votes of the subdevices with clocks enabled */
+	/* Subdevices with clocks enabled, whose rates set the rail level */
 	struct mutex level_lock;
 	struct {
-		const struct camss_clock *key;
-		u32 level;
+		const struct camss_clock *clocks;
+		int nclocks;
 	} level_votes[CAMSS_LEVEL_VOTES];
 	u32 level;
 	struct device *genpd;

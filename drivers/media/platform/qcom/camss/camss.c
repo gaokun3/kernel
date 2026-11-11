@@ -4614,41 +4614,43 @@ static u32 camss_clock_level(struct camss *camss, const struct camss_clock *cloc
 }
 
 /*
- * Vote the rail level of one subdevice's clocks (@key, 0 to drop the vote) on
- * the CAMSS power domain, which passes it on to the rail (MMCX).
+ * Add (@on) or drop the clocks of one subdevice from the rail level vote on
+ * the CAMSS power domain, which passes it on to the rail (MMCX). The level is
+ * taken from the rates the clocks have now, of every subdevice: a clock
+ * several of them share (camnoc_axi) keeps the rate the last one set, which
+ * may be above what the subdevice voting for it needs.
  */
-static int camss_vote_level(struct camss *camss, const struct camss_clock *key,
-			    u32 level)
+static int camss_vote_level(struct camss *camss, const struct camss_clock *clocks,
+			    int nclocks, bool on)
 {
 	struct device *pd = camss->genpd ?: camss->dev;
 	unsigned int i, free = CAMSS_LEVEL_VOTES, added = CAMSS_LEVEL_VOTES;
 	u32 max = 0;
-	int ret = 0;
+	int j, ret = 0;
 
 	mutex_lock(&camss->level_lock);
 	for (i = 0; i < CAMSS_LEVEL_VOTES; i++) {
-		if (camss->level_votes[i].key == key) {
-			camss->level_votes[i].level = level;
-			if (!level)
-				camss->level_votes[i].key = NULL;
+		if (camss->level_votes[i].clocks == clocks) {
+			if (!on)
+				camss->level_votes[i].clocks = NULL;
 			break;
 		}
-		if (!camss->level_votes[i].key && free == CAMSS_LEVEL_VOTES)
+		if (!camss->level_votes[i].clocks && free == CAMSS_LEVEL_VOTES)
 			free = i;
 	}
-	if (i == CAMSS_LEVEL_VOTES && level) {
+	if (i == CAMSS_LEVEL_VOTES && on) {
 		if (free == CAMSS_LEVEL_VOTES) {
 			ret = -ENOSPC;
 			goto out;
 		}
-		camss->level_votes[free].key = key;
-		camss->level_votes[free].level = level;
+		camss->level_votes[free].clocks = clocks;
+		camss->level_votes[free].nclocks = nclocks;
 		added = free;
 	}
 
 	for (i = 0; i < CAMSS_LEVEL_VOTES; i++)
-		if (camss->level_votes[i].key)
-			max = max(max, camss->level_votes[i].level);
+		for (j = 0; camss->level_votes[i].clocks && j < camss->level_votes[i].nclocks; j++)
+			max = max(max, camss_clock_level(camss, &camss->level_votes[i].clocks[j]));
 
 	if (max != camss->level) {
 		ret = dev_pm_genpd_set_performance_state(pd, max);
@@ -4657,7 +4659,7 @@ static int camss_vote_level(struct camss *camss, const struct camss_clock *key,
 			camss->level = max;
 		} else if (added < CAMSS_LEVEL_VOTES) {
 			/* The caller fails and never drops this vote */
-			camss->level_votes[added].key = NULL;
+			camss->level_votes[added].clocks = NULL;
 		}
 	}
 out:
@@ -4691,7 +4693,7 @@ int camss_enable_clocks(int nclocks, struct camss_clock *clock,
 		for (i = 0; i < nclocks; i++)
 			level = max(level, camss_clock_level(camss, &clock[i]));
 		if (level) {
-			ret = camss_vote_level(camss, clock, level);
+			ret = camss_vote_level(camss, clock, nclocks, true);
 			if (ret)
 				return ret;
 		}
@@ -4711,7 +4713,7 @@ error:
 	for (i--; i >= 0; i--)
 		clk_disable_unprepare(clock[i].clk);
 	if (level)
-		camss_vote_level(camss, clock, 0);
+		camss_vote_level(camss, clock, nclocks, false);
 
 	return ret;
 }
@@ -4734,7 +4736,7 @@ void camss_disable_clocks(int nclocks, struct camss_clock *clock,
 		clk_disable_unprepare(clock[i].clk);
 
 	if (camss && camss->res->clock_levels)
-		camss_vote_level(camss, clock, 0);
+		camss_vote_level(camss, clock, nclocks, false);
 }
 
 /*

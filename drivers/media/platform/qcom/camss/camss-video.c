@@ -332,13 +332,19 @@ static bool video_entity_shared(struct media_entity *entity,
 	return false;
 }
 
+/* Subdevs one stream start may start: the other stripe's two, its own four */
+#define VIDEO_MAX_STARTED	8
+
 static int video_start_streaming(struct vb2_queue *q, unsigned int count)
 {
 	struct camss_video *video = vb2_get_drv_priv(q);
 	struct video_device *vdev = &video->vdev;
+	struct v4l2_subdev *started[VIDEO_MAX_STARTED];
+	unsigned int nstarted = 0;
 	struct media_entity *entity;
 	struct media_pad *pad;
 	struct v4l2_subdev *subdev;
+	bool first = true;
 	int ret;
 
 	ret = video_device_pipeline_alloc_start(vdev);
@@ -357,13 +363,24 @@ static int video_start_streaming(struct vb2_queue *q, unsigned int count)
 	 * start last and both CSIDs see the first frame.
 	 */
 	subdev = video_extra_source(video, NULL);
+	/* The other stripe's pixel path must be free: it writes this node */
+	if (subdev && !video_chain_has(video, &subdev->entity) &&
+	    subdev->s_stream_enabled) {
+		ret = -EBUSY;
+		goto error;
+	}
 	while (subdev) {
 		entity = &subdev->entity;
 		if (video_chain_has(video, entity) || subdev->s_stream_enabled)
 			break;
+		if (nstarted == VIDEO_MAX_STARTED) {
+			ret = -EINVAL;
+			goto error;
+		}
 		ret = v4l2_subdev_call(subdev, video, s_stream, 1);
 		if (ret < 0 && ret != -ENOIOCTLCMD)
 			goto error;
+		started[nstarted++] = subdev;
 		pad = media_pad_remote_pad_first(&entity->pads[0]);
 		if (!(entity->pads[0].flags & MEDIA_PAD_FL_SINK) || !pad ||
 		    !is_media_entity_v4l2_subdev(pad->entity))
@@ -384,18 +401,41 @@ static int video_start_streaming(struct vb2_queue *q, unsigned int count)
 		entity = pad->entity;
 		subdev = media_entity_to_v4l2_subdev(entity);
 
-		/* Shared with a node that streams already, as is all upstream */
-		if (subdev->s_stream_enabled)
+		/*
+		 * Shared with a node that streams already, as is all upstream.
+		 * Not the line that feeds this node: its output already goes
+		 * elsewhere (a dual IFE slave writes the master's node).
+		 */
+		if (subdev->s_stream_enabled) {
+			if (first) {
+				ret = -EBUSY;
+				goto error;
+			}
 			break;
+		}
+		first = false;
 
+		if (nstarted == VIDEO_MAX_STARTED) {
+			ret = -EINVAL;
+			goto error;
+		}
 		ret = v4l2_subdev_call(subdev, video, s_stream, 1);
 		if (ret < 0 && ret != -ENOIOCTLCMD)
 			goto error;
+		started[nstarted++] = subdev;
 	}
 
 	return 0;
 
 error:
+	/*
+	 * Stop what this start started, the last first: a subdev left
+	 * streaming keeps its state (a dual IFE pairing, the VFE line) into
+	 * the next start.
+	 */
+	while (nstarted)
+		v4l2_subdev_call(started[--nstarted], video, s_stream, 0);
+
 	video_device_pipeline_stop(vdev);
 
 flush_buffers:

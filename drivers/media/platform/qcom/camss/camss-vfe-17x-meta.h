@@ -22,11 +22,14 @@ bool vfe17x_meta_frame_started(struct vfe_device *vfe);
 bool vfe17x_meta_before_first_frame(struct vfe_device *vfe);
 bool vfe17x_meta_epoch(struct vfe_device *vfe, bool next_written);
 bool vfe17x_meta_running(struct vfe_device *vfe);
+bool vfe17x_meta_running_locked(struct vfe_device *vfe);
+u64 vfe17x_meta_period_ns(struct vfe_device *vfe);
 void vfe17x_meta_lock(struct vfe_device *vfe);
 void vfe17x_meta_unlock(struct vfe_device *vfe);
 bool vfe17x_meta_join_open_locked(struct vfe_device *vfe);
 bool vfe17x_meta_join_locked(struct vfe_device *vfe);
 void vfe17x_meta_bus(struct vfe_device *vfe, u32 bus_status1);
+void vfe17x_meta_epoch1(struct vfe_device *vfe, bool late);
 void vfe17x_meta_sequence(struct vfe_device *vfe, u32 *sequence);
 
 #endif /* QC_MSM_CAMSS_VFE_17X_META_H */
