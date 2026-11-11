@@ -758,6 +758,41 @@ static int csid_set_power(struct v4l2_subdev *sd, int on)
  * Return 0 on success or a negative error code otherwise
  */
 /*
+ * csid_frame_error - A port of the CSID received a corrupt frame
+ * @csid: CSID device
+ * @port: source port
+ *
+ * The VFE line it feeds marks the buffer of that frame. Interrupt context;
+ * the links do not change while streaming.
+ */
+void csid_frame_error(struct csid_device *csid, u8 port)
+{
+	struct media_pad *pad;
+
+	pad = media_pad_remote_pad_first(&csid->pads[MSM_CSID_PAD_FIRST_SRC + port]);
+	if (!pad || !is_media_entity_v4l2_subdev(pad->entity))
+		return;
+	vfe_line_frame_error(v4l2_get_subdevdata(media_entity_to_v4l2_subdev(pad->entity)));
+}
+
+/*
+ * csid_fatal_error - A port of the CSID stopped delivering frames
+ * @csid: CSID device
+ * @port: source port
+ *
+ * The streams of the VFE line it feeds must restart. Interrupt context.
+ */
+void csid_fatal_error(struct csid_device *csid, u8 port)
+{
+	struct media_pad *pad;
+
+	pad = media_pad_remote_pad_first(&csid->pads[MSM_CSID_PAD_FIRST_SRC + port]);
+	if (!pad || !is_media_entity_v4l2_subdev(pad->entity))
+		return;
+	vfe_line_fatal_error(v4l2_get_subdevdata(media_entity_to_v4l2_subdev(pad->entity)));
+}
+
+/*
  * Dual IFE: the CSIDs feeding the two pixel paths of a VFE pair start and
  * stop on the same frame boundary, the one of the master VFE driving the
  * other. The VFEs paired when the slave's pixel path started, before its

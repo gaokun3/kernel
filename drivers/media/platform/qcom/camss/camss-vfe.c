@@ -633,6 +633,7 @@ int vfe_enable_output_v2(struct vfe_line *line)
 	WARN_ON(output->gen2.active_num);
 
 	output->state = VFE_OUTPUT_ON;
+	output->error = false;
 
 	output->sequence = 0;
 	output->wait_reg_update = 0;
@@ -1268,6 +1269,40 @@ exit:
 	mutex_unlock(&vfe->power_lock);
 }
 
+
+/*
+ * vfe_line_fatal_error - The VFE a line belongs to is wedged
+ * @line: VFE line
+ *
+ * Its streams produce nothing more until restarted: the queues report the
+ * error to userspace, which stops and starts them again. Interrupt context.
+ */
+void vfe_line_fatal_error(struct vfe_line *line)
+{
+	struct vfe_device *vfe = to_vfe(line);
+
+	if (vfe->res->hw_ops->fatal_error)
+		vfe->res->hw_ops->fatal_error(vfe);
+}
+
+/*
+ * vfe_line_frame_error - The frame a line is writing came in corrupt
+ * @line: VFE line
+ *
+ * Its buffer completes with VB2_BUF_STATE_ERROR; a dual IFE slave passes
+ * it on to the master's buffer with its stripe. Called in interrupt context,
+ * by the VFE and by the CSID feeding it.
+ */
+void vfe_line_frame_error(struct vfe_line *line)
+{
+	struct vfe_device *vfe = to_vfe(line);
+	unsigned long flags;
+
+	spin_lock_irqsave(&vfe->output_lock, flags);
+	if (line->output.state == VFE_OUTPUT_ON)
+		line->output.error = true;
+	spin_unlock_irqrestore(&vfe->output_lock, flags);
+}
 /*
  * vfe_flush_buffers - Return all vb2 buffers
  * @vid: Video device structure

@@ -265,6 +265,22 @@
 #define		STATUS2_DUAL_COMP_OVERWRITE		BIT(7)
 
 #define VFE_BUS_IRQ_CLEAR_GLOBAL		(0x2068)
+#define VFE_BUS_COMP_ERROR_STATUS		(0x206c)
+#define VFE_BUS_COMP_OVERWRITE_STATUS		(0x2070)
+#define VFE_BUS_DEBUG_STATUS0			(0x2270)
+
+/* The error interrupts, as the vendor driver for Titan 175 takes them */
+#define VFE_ERR_MASK_0				0x0003fc00
+#define VFE_ERR_MASK_1				0xefff7e80
+#define VFE_BUS_ERR_MASK_0			(STATUS0_COMP_ERROR | \
+						 STATUS0_COMP_OVERWRITE | \
+						 STATUS0_OVERFLOW | \
+						 STATUS0_VIOLATION)
+#define VFE_BUS_ERR_MASK_2			(STATUS2_DUAL_COMP_ERROR | \
+						 STATUS2_DUAL_COMP_OVERWRITE)
+/* More error interrupts than this in VFE_ERR_WINDOW_NS turn them off */
+#define VFE_ERR_STORM				16
+#define VFE_ERR_WINDOW_NS			(100 * NSEC_PER_MSEC)
 
 #define VFE_BUS_WM_DEBUG_STATUS_CFG		(0x226c)
 #define		DEBUG_STATUS_CFG_STATUS0(n)	BIT(n)
@@ -855,6 +871,9 @@ static struct vfe_line *vfe_pix_dual_master(struct vfe_line *line)
 static unsigned int vfe_pix_dual_collect(struct vfe_pix_dual *d, u64 ts,
 					 struct camss_buffer **done, bool *error)
 {
+	/* error[] comes in as the error state of the slave's stripe */
+	bool stripe_error = error[0];
+
 	unsigned int i = 0, n = 0;
 
 	while (i < d->nheld) {
@@ -862,7 +881,7 @@ static unsigned int vfe_pix_dual_collect(struct vfe_pix_dual *d, u64 ts,
 
 		if (t + VFE_DUAL_MATCH_NS > ts) {
 			if (t < ts + VFE_DUAL_MATCH_NS) {
-				error[n] = false;
+				error[n] = d->held[i].error || stripe_error;
 				done[n++] = d->held[i].buf;
 			} else {
 				i++;
@@ -903,11 +922,15 @@ static void vfe_pix_dual_slave_done(struct vfe_device *vfe)
 	u64 ts = ktime_get_ns();
 
 	spin_lock_irqsave(&vfe->output_lock, flags);
+	/* A corrupt stripe makes the master's buffer of that frame corrupt */
+	error[0] = vfe->line[VFE_LINE_PIX].output.error;
+	vfe->line[VFE_LINE_PIX].output.error = false;
 	master = vfe->dual.peer;
 	if (master) {
 		spin_lock_nested(&master->output_lock, SINGLE_DEPTH_NESTING);
 		if (master->dual.peer == vfe) {
 			master->dual.slave_ts = ts;
+			master->dual.slave_error = error[0];
 			n = vfe_pix_dual_collect(&master->dual, ts, done, error);
 		}
 		spin_unlock(&master->output_lock);
@@ -917,7 +940,7 @@ static void vfe_pix_dual_slave_done(struct vfe_device *vfe)
 	for (i = 0; i < n; i++) {
 		if (error[i])
 			dev_dbg_ratelimited(vfe->camss->dev,
-					    "VFE%d: no stripe for frame %u\n", vfe->id,
+					    "VFE%d: frame %u incomplete or corrupt\n", vfe->id,
 					    done[i]->vb.sequence);
 		vb2_buffer_done(&done[i]->vb.vb2_buf,
 				error[i] ? VB2_BUF_STATE_ERROR : VB2_BUF_STATE_DONE);
@@ -1025,6 +1048,7 @@ static int vfe_pix_enable_output(struct vfe_line *line)
 		if (ret < 0)
 			goto out_unlock;
 		output->state = VFE_OUTPUT_ON;
+		output->error = false;
 		output->sequence = 0;
 		vfe_reg_update(vfe, line->id);
 		dev_dbg(vfe->camss->dev, "VFE%d: pixel path stripe of VFE%d at %u\n",
@@ -1037,6 +1061,7 @@ static int vfe_pix_enable_output(struct vfe_line *line)
 		goto out_unlock;
 
 	output->state = VFE_OUTPUT_ON;
+	output->error = false;
 	output->sequence = 0;
 	output->wait_reg_update = 0;
 	reinit_completion(&output->reg_update);
@@ -1113,6 +1138,89 @@ static void vfe_violation_read(struct vfe_device *vfe)
 	pr_err_ratelimited("VFE: violation = 0x%08x\n", violation);
 }
 
+/*
+ * The VFE is wedged, measured on SC8280XP: after one frame with a bus error
+ * the pixel path writes nothing more until the stream restarts. Make every
+ * queue it feeds fail, once per stream start, so that userspace restarts
+ * them; with dual IFE, the master's queues hold both stripes.
+ */
+static void vfe17x_fatal_error(struct vfe_device *vfe)
+{
+	struct vfe_device *master = NULL;
+	unsigned long flags;
+	unsigned int i;
+	bool first;
+
+	spin_lock_irqsave(&vfe->output_lock, flags);
+	first = !vfe->errors.fatal;
+	vfe->errors.fatal = true;
+	if (first) {
+		for (i = 0; i < vfe->res->line_num; i++)
+			if (vfe->line[i].output.state == VFE_OUTPUT_ON)
+				vb2_queue_error(&vfe->line[i].video_out.vb2_q);
+		if (vfe->dual.peer && !vfe->dual.master)
+			master = vfe->dual.peer;
+	}
+	spin_unlock_irqrestore(&vfe->output_lock, flags);
+
+	if (!first)
+		return;
+
+	vfe17x_meta_fatal(vfe);
+	dev_err(vfe->camss->dev, "VFE%d: wedged, the streams must restart\n", vfe->id);
+	if (master)
+		vfe17x_fatal_error(master);
+}
+
+/*
+ * An error interrupt: the frames being written are corrupt and the VFE is
+ * wedged (see vfe17x_fatal_error()). Every line streaming marks its buffer.
+ * A storm of them turns the error interrupts off until the next stream
+ * start.
+ */
+static void vfe_isr_error(struct vfe_device *vfe, u32 err0, u32 err1,
+			  u32 bus0, u32 bus2)
+{
+	struct vfe_errors *e = &vfe->errors;
+	u64 now = ktime_get_ns();
+	unsigned int i;
+
+	for (i = 0; i < vfe->res->line_num; i++)
+		vfe_line_frame_error(&vfe->line[i]);
+	vfe17x_fatal_error(vfe);
+
+	e->count++;
+	dev_err_ratelimited(vfe->camss->dev,
+			    "VFE%d: error irq %08x %08x bus %08x %08x, violation %08x debug %08x comp error %08x overwrite %08x, wm %08x %08x\n",
+			    vfe->id, err0, err1, bus0, bus2,
+			    readl_relaxed(vfe->base + VFE_VIOLATION_STATUS),
+			    readl_relaxed(vfe->base + VFE_BUS_DEBUG_STATUS0),
+			    readl_relaxed(vfe->base + VFE_BUS_COMP_ERROR_STATUS),
+			    readl_relaxed(vfe->base + VFE_BUS_COMP_OVERWRITE_STATUS),
+			    readl_relaxed(vfe->base + VFE_BUS_WM_STATUS0(VFE_WM_PIX_FULL_Y)),
+			    readl_relaxed(vfe->base + VFE_BUS_WM_STATUS1(VFE_WM_PIX_FULL_Y)));
+
+	if (now - e->window > VFE_ERR_WINDOW_NS) {
+		e->window = now;
+		e->window_count = 0;
+	}
+	if (++e->window_count > VFE_ERR_STORM && !e->off) {
+		e->off = true;
+		writel_relaxed(readl_relaxed(vfe->base + VFE_IRQ_MASK_0) & ~VFE_ERR_MASK_0,
+			       vfe->base + VFE_IRQ_MASK_0);
+		writel_relaxed(readl_relaxed(vfe->base + VFE_IRQ_MASK_1) & ~VFE_ERR_MASK_1,
+			       vfe->base + VFE_IRQ_MASK_1);
+		writel_relaxed(readl_relaxed(vfe->base + VFE_BUS_IRQ_MASK(0)) & ~VFE_BUS_ERR_MASK_0,
+			       vfe->base + VFE_BUS_IRQ_MASK(0));
+		writel_relaxed(readl_relaxed(vfe->base + VFE_BUS_IRQ_MASK(2)) & ~VFE_BUS_ERR_MASK_2,
+			       vfe->base + VFE_BUS_IRQ_MASK(2));
+		dev_err(vfe->camss->dev,
+			"VFE%d: %u error interrupts within %u ms, turned off until the next start (%u so far)\n",
+			vfe->id, e->window_count, (u32)(VFE_ERR_WINDOW_NS / NSEC_PER_MSEC),
+			e->count);
+	}
+}
+
 /* Status 0 bit reporting a completed reg update of a line */
 static u32 vfe_reg_update_done_bit(struct vfe_device *vfe, enum vfe_line_id line_id)
 {
@@ -1163,8 +1271,12 @@ static irqreturn_t vfe_isr(int irq, void *dev)
 	if (status0 & STATUS_0_RESET_ACK)
 		vfe->isr_ops.reset_ack(vfe);
 
-	if (status1 & STATUS_1_VIOLATION)
-		vfe_violation_read(vfe);
+	if ((status0 & VFE_ERR_MASK_0) || (status1 & VFE_ERR_MASK_1) ||
+	    (vfe_bus_status[0] & VFE_BUS_ERR_MASK_0) ||
+	    (vfe_bus_status[2] & VFE_BUS_ERR_MASK_2))
+		vfe_isr_error(vfe, status0 & VFE_ERR_MASK_0, status1 & VFE_ERR_MASK_1,
+			      vfe_bus_status[0] & VFE_BUS_ERR_MASK_0,
+			      vfe_bus_status[2] & VFE_BUS_ERR_MASK_2);
 
 	/* Epoch 0 of the pixel path: program the next frame's parameters */
 	if ((status0 & STATUS_0_CAMIF_EPOCH0) && vfe17x_meta_epoch(vfe)) {
@@ -1280,8 +1392,10 @@ static int vfe_enable(struct vfe_line *line)
 
 	mutex_lock(&vfe->stream_lock);
 
-	if (!vfe->stream_count)
+	if (!vfe->stream_count) {
+		memset(&vfe->errors, 0, sizeof(vfe->errors));
 		vfe_enable_irq_common(vfe);
+	}
 
 	vfe->stream_count++;
 
@@ -1361,7 +1475,7 @@ static void vfe_isr_wm_done(struct vfe_device *vfe, u8 wm)
 	struct vfe_output *output;
 	unsigned long flags;
 	unsigned int i, ndone = 0;
-	bool dual;
+	bool dual, bad;
 	u32 index;
 	u64 ts = ktime_get_ns();
 
@@ -1392,6 +1506,8 @@ static void vfe_isr_wm_done(struct vfe_device *vfe, u8 wm)
 	ready_buf->vb.sequence = output->sequence++;
 	if (line->id == VFE_LINE_PIX)
 		vfe17x_meta_sequence(vfe, &ready_buf->vb.sequence);
+	bad = output->error;
+	output->error = false;
 
 	index = 0;
 	output->buf[0] = output->buf[1];
@@ -1425,6 +1541,7 @@ static void vfe_isr_wm_done(struct vfe_device *vfe, u8 wm)
 		struct vfe_pix_dual *d = &vfe->dual;
 
 		if (d->slave_ts + VFE_DUAL_MATCH_NS > ts) {
+			error[ndone] = bad || d->slave_error;
 			done[ndone++] = ready_buf;
 		} else {
 			if (d->nheld == VFE_DUAL_HELD) {
@@ -1435,9 +1552,11 @@ static void vfe_isr_wm_done(struct vfe_device *vfe, u8 wm)
 			}
 			d->held[d->nheld].buf = ready_buf;
 			d->held[d->nheld].ts = ts;
+			d->held[d->nheld].error = bad;
 			d->nheld++;
 		}
 	} else {
+		error[ndone] = bad;
 		done[ndone++] = ready_buf;
 	}
 
@@ -1529,4 +1648,5 @@ const struct vfe_hw_ops vfe_ops_170 = {
 	.vfe_wm_update = vfe_wm_update,
 	.meta_register = vfe17x_meta_register,
 	.meta_unregister = vfe17x_meta_unregister,
+	.fatal_error = vfe17x_fatal_error,
 };

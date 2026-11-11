@@ -173,6 +173,13 @@ struct csid_device {
 	/* Dual IFE: this IPP starts and stops with the one of another CSID */
 	enum { CSID_IPP_SYNC_NONE, CSID_IPP_SYNC_MASTER, CSID_IPP_SYNC_SLAVE } ipp_sync;
 	u8 ipp_master;		/* slave: the master CSID */
+	/* Error interrupts since the stream start */
+	struct {
+		u32 count;
+		u64 window;	/* start of the current storm window */
+		u32 window_count;
+		bool off;	/* turned off after a storm */
+	} errors;
 	struct v4l2_ctrl_handler ctrls;
 	struct v4l2_ctrl *testgen_mode;
 	const struct csid_subdev_resources *res;
@@ -256,5 +263,8 @@ u32 csid_hw_version(struct csid_device *csid);
  */
 u32 csid_src_pad_code(struct csid_device *csid, u32 sink_code,
 		      unsigned int match_format_idx, u32 match_code);
+
+void csid_frame_error(struct csid_device *csid, u8 port);
+void csid_fatal_error(struct csid_device *csid, u8 port);
 
 #endif /* QC_MSM_CAMSS_CSID_H */

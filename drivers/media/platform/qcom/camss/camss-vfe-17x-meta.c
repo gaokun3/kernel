@@ -637,6 +637,20 @@ void vfe17x_meta_stop(struct vfe_device *vfe)
 	}
 }
 
+/* The pixel path is wedged: the parameters and statistics queues must restart */
+void vfe17x_meta_fatal(struct vfe_device *vfe)
+{
+	struct vfe_pix_meta *meta = vfe->pix_meta;
+
+	if (!meta)
+		return;
+
+	if (vb2_is_streaming(&meta->stats_q))
+		vb2_queue_error(&meta->stats_q);
+	if (vb2_is_streaming(&meta->params_q))
+		vb2_queue_error(&meta->params_q);
+}
+
 /*
  * CAMIF epoch 0 interrupt: program the parameters of a later frame. Returns
  * true if registers changed and need a PIX register update.

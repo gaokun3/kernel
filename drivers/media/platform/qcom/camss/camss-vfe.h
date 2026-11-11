@@ -77,6 +77,7 @@ struct vfe_output {
 	};
 	enum vfe_output_state state;
 	unsigned int sequence;
+	bool error;		/* the frame being written came in corrupt */
 
 	int wait_reg_update;
 	struct completion sof;
@@ -123,6 +124,8 @@ struct vfe_hw_ops {
 	/* Optional parameters and statistics nodes of the pixel pipeline */
 	int (*meta_register)(struct vfe_device *vfe, struct v4l2_device *v4l2_dev);
 	void (*meta_unregister)(struct vfe_device *vfe);
+	/* Optional: the streams must restart, tell their queues */
+	void (*fatal_error)(struct vfe_device *vfe);
 };
 
 struct vfe_pix_meta;
@@ -169,11 +172,22 @@ struct vfe_pix_dual {
 	bool master;
 	u32 x_offset;		/* master: byte offset of the slave stripe */
 	u64 slave_ts;		/* master: when the slave last wrote a stripe */
+	bool slave_error;	/* master: that stripe came in corrupt */
 	unsigned int nheld;	/* master: buffers waiting for the slave */
 	struct {
 		struct camss_buffer *buf;
 		u64 ts;
+		bool error;
 	} held[VFE_DUAL_HELD];
+};
+
+/* Error interrupts of a VFE, from its first stream start on */
+struct vfe_errors {
+	u32 count;		/* error interrupts */
+	u64 window;		/* start of the current storm window */
+	u32 window_count;	/* error interrupts in it */
+	bool off;		/* turned off after a storm */
+	bool fatal;		/* the queues were told to restart */
 };
 
 struct vfe_device {
@@ -197,6 +211,7 @@ struct vfe_device {
 	u32 reg_update;
 	struct vfe_pix_meta *pix_meta;
 	struct vfe_pix_dual dual;
+	struct vfe_errors errors;
 	u8 was_streaming;
 	const struct vfe_subdev_resources *res;
 	const struct vfe_hw_ops_gen1 *ops_gen1;
@@ -228,6 +243,9 @@ void vfe_buf_add_pending(struct vfe_output *output, struct camss_buffer *buffer)
 struct camss_buffer *vfe_buf_get_pending(struct vfe_output *output);
 
 int vfe_flush_buffers(struct camss_video *vid, enum vb2_buffer_state state);
+
+void vfe_line_frame_error(struct vfe_line *line);
+void vfe_line_fatal_error(struct vfe_line *line);
 
 /*
  * vfe_isr_comp_done - Process composite image done interrupt

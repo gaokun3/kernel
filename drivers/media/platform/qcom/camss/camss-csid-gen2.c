@@ -10,6 +10,7 @@
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/kernel.h>
+#include <linux/moduleparam.h>
 #include <linux/of.h>
 
 #include "camss-csid.h"
@@ -33,6 +34,7 @@
 #define CSID_PORT_IPP			3
 
 #define CSID_IPP_IRQ_STATUS		0x30
+#define CSID_IPP_IRQ_MASK		0x34
 #define CSID_IPP_IRQ_CLEAR		0x38
 #define CSID_IPP_CFG0			0x200
 #define		IPP_CFG0_CROP_H_EN	5
@@ -56,6 +58,22 @@
 #define CSID_CSI2_RX_IRQ_STATUS	0x20
 #define	CSID_CSI2_RX_IRQ_MASK	0x24
 #define CSID_CSI2_RX_IRQ_CLEAR	0x28
+/* Receiver errors the vendor driver takes, D-PHY ones */
+#define		RX_ERR_LANE_FIFO_OVERFLOW	GENMASK(18, 15)
+#define		RX_ERR_CRC			BIT(19)
+#define		RX_ERR_ECC			BIT(20)
+#define		RX_ERR_STREAM_UNDERFLOW		BIT(23)
+#define		RX_ERR_UNBOUNDED_FRAME		BIT(24)
+#define		RX_ERR_TG_FIFO_OVERFLOW		BIT(26)
+#define		RX_ERR_ALL			(RX_ERR_LANE_FIFO_OVERFLOW | RX_ERR_CRC | \
+						 RX_ERR_ECC | RX_ERR_STREAM_UNDERFLOW | \
+						 RX_ERR_UNBOUNDED_FRAME | RX_ERR_TG_FIFO_OVERFLOW)
+/* IPP and RDI path interrupt bits */
+#define		PATH_ERR_FIFO_OVERFLOW		BIT(2)
+
+/* More error interrupts than this in CSID_ERR_WINDOW_NS turn them off */
+#define CSID_ERR_STORM		16
+#define CSID_ERR_WINDOW_NS	(100 * NSEC_PER_MSEC)
 
 #define CSID_CSI2_RDIN_IRQ_STATUS(rdi)		((csid_is_lite(csid) ? 0x30 : 0x40) \
 						 + 0x10 * (rdi))
@@ -444,10 +462,29 @@ static void __csid_configure_ipp_stream(struct csid_device *csid, u8 enable, u8 
 	writel_relaxed(val, csid->base + CSID_IPP_CFG0);
 }
 
+/* Error interrupts of the receiver and of the paths in use */
+static void csid_error_irqs(struct csid_device *csid, bool enable)
+{
+	u8 i;
+
+	writel_relaxed(enable ? RX_ERR_ALL : 0, csid->base + CSID_CSI2_RX_IRQ_MASK);
+	for (i = 0; i < MSM_CSID_MAX_SRC_STREAMS; i++) {
+		if (!(csid->phy.en_vc & BIT(i)))
+			continue;
+		writel_relaxed(enable ? PATH_ERR_FIFO_OVERFLOW : 0,
+			       csid->base + (csid_port_is_ipp(csid, i) ?
+					     CSID_IPP_IRQ_MASK : CSID_CSI2_RDIN_IRQ_MASK(i)));
+	}
+}
+
 static void csid_configure_stream(struct csid_device *csid, u8 enable)
 {
 	struct csid_testgen_config *tg = &csid->testgen;
 	u8 i;
+
+	if (enable)
+		memset(&csid->errors, 0, sizeof(csid->errors));
+	csid_error_irqs(csid, enable);
 
 	/* Loop through all enabled ports and configure a stream for each */
 	for (i = 0; i < MSM_CSID_MAX_SRC_STREAMS; i++)
@@ -482,10 +519,61 @@ static int csid_configure_testgen_pattern(struct csid_device *csid, s32 val)
  *
  * Return IRQ_HANDLED on success
  */
+/*
+ * A receiver error corrupts the frame of every port, a path FIFO overflow
+ * that of its port. FIFO overflows stop the path (the vendor driver treats
+ * them as fatal), as does a storm of errors, which then turns the error
+ * interrupts off until the next stream start: the streams must restart.
+ */
+static void csid_isr_error(struct csid_device *csid, u32 rx, u32 ports)
+{
+	u64 now = ktime_get_ns();
+	bool fatal;
+	u8 i;
+
+	csid->errors.count++;
+	dev_err_ratelimited(csid->camss->dev,
+			    "CSID%d: error irq rx %08x%s%s%s%s%s%s, path fifo overflow on ports %x\n",
+			    csid->id, rx,
+			    rx & RX_ERR_LANE_FIFO_OVERFLOW ? " lane-fifo-overflow" : "",
+			    rx & RX_ERR_CRC ? " crc" : "",
+			    rx & RX_ERR_ECC ? " ecc" : "",
+			    rx & RX_ERR_STREAM_UNDERFLOW ? " stream-underflow" : "",
+			    rx & RX_ERR_UNBOUNDED_FRAME ? " unbounded-frame" : "",
+			    rx & RX_ERR_TG_FIFO_OVERFLOW ? " tg-fifo-overflow" : "",
+			    ports);
+
+	for (i = 0; i < MSM_CSID_MAX_SRC_STREAMS; i++)
+		if ((csid->phy.en_vc & BIT(i)) && (rx || (ports & BIT(i))))
+			csid_frame_error(csid, i);
+
+	fatal = ports || (rx & (RX_ERR_LANE_FIFO_OVERFLOW | RX_ERR_TG_FIFO_OVERFLOW));
+
+	if (now - csid->errors.window > CSID_ERR_WINDOW_NS) {
+		csid->errors.window = now;
+		csid->errors.window_count = 0;
+	}
+	if (++csid->errors.window_count > CSID_ERR_STORM && !csid->errors.off) {
+		csid->errors.off = true;
+		fatal = true;
+		csid_error_irqs(csid, false);
+		dev_err(csid->camss->dev,
+			"CSID%d: %u error interrupts within %u ms, turned off until the next start (%u so far)\n",
+			csid->id, csid->errors.window_count,
+			(u32)(CSID_ERR_WINDOW_NS / NSEC_PER_MSEC), csid->errors.count);
+	}
+
+	if (fatal)
+		for (i = 0; i < MSM_CSID_MAX_SRC_STREAMS; i++)
+			if ((csid->phy.en_vc & BIT(i)) &&
+			    (ports & BIT(i) || !ports))
+				csid_fatal_error(csid, i);
+}
+
 static irqreturn_t csid_isr(int irq, void *dev)
 {
 	struct csid_device *csid = dev;
-	u32 val;
+	u32 val, rx, ports = 0;
 	u8 reset_done;
 	int i;
 
@@ -493,8 +581,8 @@ static irqreturn_t csid_isr(int irq, void *dev)
 	writel_relaxed(val, csid->base + CSID_TOP_IRQ_CLEAR);
 	reset_done = val & BIT(TOP_IRQ_STATUS_RESET_DONE);
 
-	val = readl_relaxed(csid->base + CSID_CSI2_RX_IRQ_STATUS);
-	writel_relaxed(val, csid->base + CSID_CSI2_RX_IRQ_CLEAR);
+	rx = readl_relaxed(csid->base + CSID_CSI2_RX_IRQ_STATUS);
+	writel_relaxed(rx, csid->base + CSID_CSI2_RX_IRQ_CLEAR);
 
 	/* Read and clear IRQ status for each enabled RDI channel */
 	for (i = 0; i < MSM_CSID_MAX_SRC_STREAMS; i++)
@@ -502,11 +590,12 @@ static irqreturn_t csid_isr(int irq, void *dev)
 			if (csid_port_is_ipp(csid, i)) {
 				val = readl_relaxed(csid->base + CSID_IPP_IRQ_STATUS);
 				writel_relaxed(val, csid->base + CSID_IPP_IRQ_CLEAR);
-				continue;
+			} else {
+				val = readl_relaxed(csid->base + CSID_CSI2_RDIN_IRQ_STATUS(i));
+				writel_relaxed(val, csid->base + CSID_CSI2_RDIN_IRQ_CLEAR(i));
 			}
-
-			val = readl_relaxed(csid->base + CSID_CSI2_RDIN_IRQ_STATUS(i));
-			writel_relaxed(val, csid->base + CSID_CSI2_RDIN_IRQ_CLEAR(i));
+			if (val & PATH_ERR_FIFO_OVERFLOW)
+				ports |= BIT(i);
 		}
 
 	val = 1 << IRQ_CMD_CLEAR;
@@ -514,6 +603,9 @@ static irqreturn_t csid_isr(int irq, void *dev)
 
 	if (reset_done)
 		complete(&csid->reset_complete);
+
+	if ((rx & RX_ERR_ALL) || ports)
+		csid_isr_error(csid, rx & RX_ERR_ALL, ports);
 
 	return IRQ_HANDLED;
 }
