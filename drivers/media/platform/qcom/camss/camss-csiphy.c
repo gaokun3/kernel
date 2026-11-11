@@ -728,11 +728,16 @@ static int csiphy_link_setup(struct media_entity *entity,
 		struct csiphy_device *csiphy;
 		struct csid_device *csid;
 
-		if (media_pad_remote_pad_first(local))
-			return -EBUSY;
-
 		sd = media_entity_to_v4l2_subdev(entity);
 		csiphy = v4l2_get_subdevdata(sd);
+
+		/*
+		 * A CSIPHY with a clock mux drives one CSID. Without it, each
+		 * CSID selects its PHY and several can take the same stream,
+		 * e.g. two pixel paths sharing a wide frame.
+		 */
+		if (csiphy->base_clk_mux && media_pad_remote_pad_first(local))
+			return -EBUSY;
 
 		sd = media_entity_to_v4l2_subdev(remote->entity);
 		csid = v4l2_get_subdevdata(sd);
