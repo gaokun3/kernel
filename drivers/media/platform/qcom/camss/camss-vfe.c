@@ -283,10 +283,104 @@ const struct camss_formats vfe_formats_pix_845 = {
 	.formats = formats_rdi_845
 };
 
+/* Bayer input of the SC8280XP IFE pixel pipeline (CSID IPP -> CAMIF) */
+static const struct camss_format_info formats_pix_8280xp[] = {
+	{ MEDIA_BUS_FMT_SBGGR8_1X8, 8, V4L2_PIX_FMT_SBGGR8, 1,
+	  PER_PLANE_DATA(0, 1, 1, 1, 1, 8) },
+	{ MEDIA_BUS_FMT_SGBRG8_1X8, 8, V4L2_PIX_FMT_SGBRG8, 1,
+	  PER_PLANE_DATA(0, 1, 1, 1, 1, 8) },
+	{ MEDIA_BUS_FMT_SGRBG8_1X8, 8, V4L2_PIX_FMT_SGRBG8, 1,
+	  PER_PLANE_DATA(0, 1, 1, 1, 1, 8) },
+	{ MEDIA_BUS_FMT_SRGGB8_1X8, 8, V4L2_PIX_FMT_SRGGB8, 1,
+	  PER_PLANE_DATA(0, 1, 1, 1, 1, 8) },
+	{ MEDIA_BUS_FMT_SBGGR10_1X10, 10, V4L2_PIX_FMT_SBGGR10P, 1,
+	  PER_PLANE_DATA(0, 1, 1, 1, 1, 10) },
+	{ MEDIA_BUS_FMT_SGBRG10_1X10, 10, V4L2_PIX_FMT_SGBRG10P, 1,
+	  PER_PLANE_DATA(0, 1, 1, 1, 1, 10) },
+	{ MEDIA_BUS_FMT_SGRBG10_1X10, 10, V4L2_PIX_FMT_SGRBG10P, 1,
+	  PER_PLANE_DATA(0, 1, 1, 1, 1, 10) },
+	{ MEDIA_BUS_FMT_SRGGB10_1X10, 10, V4L2_PIX_FMT_SRGGB10P, 1,
+	  PER_PLANE_DATA(0, 1, 1, 1, 1, 10) },
+	{ MEDIA_BUS_FMT_SBGGR12_1X12, 12, V4L2_PIX_FMT_SBGGR12P, 1,
+	  PER_PLANE_DATA(0, 1, 1, 1, 1, 12) },
+	{ MEDIA_BUS_FMT_SGBRG12_1X12, 12, V4L2_PIX_FMT_SGBRG12P, 1,
+	  PER_PLANE_DATA(0, 1, 1, 1, 1, 12) },
+	{ MEDIA_BUS_FMT_SGRBG12_1X12, 12, V4L2_PIX_FMT_SGRBG12P, 1,
+	  PER_PLANE_DATA(0, 1, 1, 1, 1, 12) },
+	{ MEDIA_BUS_FMT_SRGGB12_1X12, 12, V4L2_PIX_FMT_SRGGB12P, 1,
+	  PER_PLANE_DATA(0, 1, 1, 1, 1, 12) },
+	{ MEDIA_BUS_FMT_SBGGR14_1X14, 14, V4L2_PIX_FMT_SBGGR14P, 1,
+	  PER_PLANE_DATA(0, 1, 1, 1, 1, 14) },
+	{ MEDIA_BUS_FMT_SGBRG14_1X14, 14, V4L2_PIX_FMT_SGBRG14P, 1,
+	  PER_PLANE_DATA(0, 1, 1, 1, 1, 14) },
+	{ MEDIA_BUS_FMT_SGRBG14_1X14, 14, V4L2_PIX_FMT_SGRBG14P, 1,
+	  PER_PLANE_DATA(0, 1, 1, 1, 1, 14) },
+	{ MEDIA_BUS_FMT_SRGGB14_1X14, 14, V4L2_PIX_FMT_SRGGB14P, 1,
+	  PER_PLANE_DATA(0, 1, 1, 1, 1, 14) },
+};
+
+/* YUV 4:2:0 output of the SC8280XP IFE pixel pipeline (FULL Y/C masters) */
+static const struct camss_format_info formats_pix_out_8280xp[] = {
+	{ MEDIA_BUS_FMT_YUYV8_1_5X8, 8, V4L2_PIX_FMT_NV12, 1,
+	  PER_PLANE_DATA(0, 1, 1, 2, 3, 8) },
+	{ MEDIA_BUS_FMT_YVYU8_1_5X8, 8, V4L2_PIX_FMT_NV21, 1,
+	  PER_PLANE_DATA(0, 1, 1, 2, 3, 8) },
+};
+
+const struct camss_formats vfe_formats_pix_8280xp = {
+	.nformats = ARRAY_SIZE(formats_pix_8280xp),
+	.formats = formats_pix_8280xp
+};
+
+const struct camss_formats vfe_formats_pix_out_8280xp = {
+	.nformats = ARRAY_SIZE(formats_pix_out_8280xp),
+	.formats = formats_pix_out_8280xp
+};
+
+/*
+ * vfe_pix_out_code - Pick a source pad code of a pixel pipeline
+ * @vfe: VFE device
+ * @index: index of the requested code, used if @req_code is 0
+ * @req_code: requested code
+ *
+ * The source codes do not depend on the Bayer order of the sink.
+ *
+ * Return a media bus code or 0 if @index is out of range
+ */
+static u32 vfe_pix_out_code(struct vfe_device *vfe, unsigned int index,
+			    u32 req_code)
+{
+	const struct camss_formats *out = vfe->res->formats_pix_out;
+	unsigned int i, j, n = 0;
+
+	if (req_code) {
+		for (i = 0; i < out->nformats; i++)
+			if (out->formats[i].code == req_code)
+				return req_code;
+
+		return out->formats[0].code;
+	}
+
+	for (i = 0; i < out->nformats; i++) {
+		for (j = 0; j < i; j++)
+			if (out->formats[j].code == out->formats[i].code)
+				break;
+		if (j < i)
+			continue;
+		if (n++ == index)
+			return out->formats[i].code;
+	}
+
+	return 0;
+}
+
 static u32 vfe_src_pad_code(struct vfe_line *line, u32 sink_code,
 			    unsigned int index, u32 src_req_code)
 {
 	struct vfe_device *vfe = to_vfe(line);
+
+	if (vfe_line_has_pix_pipeline(vfe, line->id))
+		return vfe_pix_out_code(vfe, index, src_req_code);
 
 	switch (vfe->camss->res->version) {
 	case CAMSS_8x16:
@@ -1349,7 +1443,8 @@ static void vfe_try_format(struct vfe_line *line,
 
 		/* If not found, use UYVY as default */
 		if (i >= line->nformats)
-			fmt->code = MEDIA_BUS_FMT_UYVY8_1X16;
+			fmt->code = vfe_line_has_pix_pipeline(to_vfe(line), line->id) ?
+				    line->formats[0].code : MEDIA_BUS_FMT_UYVY8_1X16;
 
 		fmt->width = clamp_t(u32, fmt->width, 1, 8191);
 		fmt->height = clamp_t(u32, fmt->height, 1, 8191);
@@ -1420,6 +1515,10 @@ static void vfe_try_compose(struct vfe_line *line,
 
 	if (rect->height < 4)
 		rect->height = 4;
+
+	/* The chroma scaler halves the compose size for YUV 4:2:0 */
+	if (vfe_line_has_pix_pipeline(to_vfe(line), line->id))
+		rect->height &= ~0x1;
 }
 
 /*
@@ -1453,6 +1552,13 @@ static void vfe_try_crop(struct vfe_line *line,
 	/* wm in line based mode writes multiple of 16 horizontally */
 	rect->left += (rect->width & 0xf) >> 1;
 	rect->width &= ~0xf;
+
+	/* Keep the crop window on chroma sample boundaries for YUV 4:2:0 */
+	if (vfe_line_has_pix_pipeline(to_vfe(line), line->id)) {
+		rect->left &= ~0x1;
+		rect->top &= ~0x1;
+		rect->height &= ~0x1;
+	}
 
 	if (rect->width < 16) {
 		rect->left = 0;
@@ -2117,6 +2223,10 @@ int msm_vfe_register_entities(struct vfe_device *vfe,
 
 		video_out->nformats = vfe->line[i].nformats;
 		video_out->formats = vfe->line[i].formats;
+		if (vfe_line_has_pix_pipeline(vfe, i)) {
+			video_out->nformats = vfe->res->formats_pix_out->nformats;
+			video_out->formats = vfe->res->formats_pix_out->formats;
+		}
 
 		snprintf(name, ARRAY_SIZE(name), "%s%d_%s%d",
 			 MSM_VFE_NAME, vfe->id, "video", i);

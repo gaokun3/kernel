@@ -141,6 +141,12 @@ struct vfe_subdev_resources {
 	const struct vfe_hw_ops *hw_ops;
 	const struct camss_formats *formats_rdi;
 	const struct camss_formats *formats_pix;
+	/*
+	 * Output formats of a pixel processing pipeline (demosaic, colour
+	 * conversion, scaler). If set, the PIX line sink accepts
+	 * @formats_pix and its source pad and video node use these formats.
+	 */
+	const struct camss_formats *formats_pix_out;
 };
 
 struct vfe_device {
@@ -240,6 +246,8 @@ extern const struct camss_formats vfe_formats_rdi_8x96;
 extern const struct camss_formats vfe_formats_pix_8x96;
 extern const struct camss_formats vfe_formats_rdi_845;
 extern const struct camss_formats vfe_formats_pix_845;
+extern const struct camss_formats vfe_formats_pix_8280xp;
+extern const struct camss_formats vfe_formats_pix_out_8280xp;
 
 extern const struct vfe_hw_ops vfe_ops_4_1;
 extern const struct vfe_hw_ops vfe_ops_4_7;
@@ -262,6 +270,21 @@ void vfe_put(struct vfe_device *vfe);
  * Return whether VFE is VFE lite
  */
 bool vfe_is_lite(struct vfe_device *vfe);
+
+/*
+ * vfe_line_has_pix_pipeline - Return if a line runs the pixel pipeline
+ * @vfe: VFE Device
+ * @line_id: VFE line
+ *
+ * True for the PIX line of a full VFE whose resources describe the output
+ * formats of the pixel pipeline (Bayer in, YUV out).
+ */
+static inline bool vfe_line_has_pix_pipeline(const struct vfe_device *vfe,
+					     enum vfe_line_id line_id)
+{
+	return line_id == VFE_LINE_PIX && !vfe->res->is_lite &&
+	       vfe->res->formats_pix_out;
+}
 
 /*
  * vfe_hw_version - Process write master done interrupt
