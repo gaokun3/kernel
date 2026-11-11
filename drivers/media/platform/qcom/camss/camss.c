@@ -8,6 +8,7 @@
  * Copyright (C) 2015-2018 Linaro Ltd.
  */
 #include <linux/clk.h>
+#include <linux/ctype.h>
 #include <linux/interconnect.h>
 #include <linux/media-bus-format.h>
 #include <linux/media.h>
@@ -27,6 +28,8 @@
 #include <media/v4l2-device.h>
 #include <media/v4l2-mc.h>
 #include <media/v4l2-fwnode.h>
+
+#include <dt-bindings/power/qcom,rpmhpd.h>
 
 #include "camss.h"
 
@@ -4569,19 +4572,130 @@ inline void camss_add_clock_margin(u64 *rate)
 	*rate = div_u64(*rate, CAMSS_CLOCK_MARGIN_DENOMINATOR);
 }
 
+static bool camss_clock_name_match(const char *pattern, const char *name)
+{
+	for (; *pattern && *name; pattern++, name++)
+		if (*pattern != *name && !(*pattern == '#' && isdigit(*name)))
+			return false;
+
+	return !*pattern && !*name;
+}
+
+/* The rail level a clock needs at its current rate, 0 if not listed */
+static u32 camss_clock_level(struct camss *camss, const struct camss_clock *clock)
+{
+	const struct camss_resources *res = camss->res;
+	u32 level = 0, best = U32_MAX, top = 0;
+	unsigned long rate;
+	unsigned int i;
+	bool listed = false;
+
+	rate = clk_get_rate(clock->clk);
+	for (i = 0; i < res->clock_levels_num; i++) {
+		const struct camss_clock_level *l = &res->clock_levels[i];
+
+		if (!camss_clock_name_match(l->clock, clock->name))
+			continue;
+		listed = true;
+		top = max(top, l->level);
+		if (rate <= l->rate && l->rate < best) {
+			best = l->rate;
+			level = l->level;
+		}
+	}
+
+	if (listed && !level) {
+		dev_warn_once(camss->dev, "%s at %lu Hz is above its rail levels\n",
+			      clock->name, rate);
+		level = top;
+	}
+
+	return level;
+}
+
+/*
+ * Vote the rail level of one subdevice's clocks (@key, 0 to drop the vote) on
+ * the CAMSS power domain, which passes it on to the rail (MMCX).
+ */
+static int camss_vote_level(struct camss *camss, const struct camss_clock *key,
+			    u32 level)
+{
+	struct device *pd = camss->genpd ?: camss->dev;
+	unsigned int i, free = CAMSS_LEVEL_VOTES, added = CAMSS_LEVEL_VOTES;
+	u32 max = 0;
+	int ret = 0;
+
+	mutex_lock(&camss->level_lock);
+	for (i = 0; i < CAMSS_LEVEL_VOTES; i++) {
+		if (camss->level_votes[i].key == key) {
+			camss->level_votes[i].level = level;
+			if (!level)
+				camss->level_votes[i].key = NULL;
+			break;
+		}
+		if (!camss->level_votes[i].key && free == CAMSS_LEVEL_VOTES)
+			free = i;
+	}
+	if (i == CAMSS_LEVEL_VOTES && level) {
+		if (free == CAMSS_LEVEL_VOTES) {
+			ret = -ENOSPC;
+			goto out;
+		}
+		camss->level_votes[free].key = key;
+		camss->level_votes[free].level = level;
+		added = free;
+	}
+
+	for (i = 0; i < CAMSS_LEVEL_VOTES; i++)
+		if (camss->level_votes[i].key)
+			max = max(max, camss->level_votes[i].level);
+
+	if (max != camss->level) {
+		ret = dev_pm_genpd_set_performance_state(pd, max);
+		if (!ret) {
+			dev_dbg(camss->dev, "rail level %u -> %u\n", camss->level, max);
+			camss->level = max;
+		} else if (added < CAMSS_LEVEL_VOTES) {
+			/* The caller fails and never drops this vote */
+			camss->level_votes[added].key = NULL;
+		}
+	}
+out:
+	mutex_unlock(&camss->level_lock);
+	if (ret)
+		dev_err(camss->dev, "rail level %u: %d\n", max, ret);
+
+	return ret;
+}
+
 /*
  * camss_enable_clocks - Enable multiple clocks
  * @nclocks: Number of clocks in clock array
  * @clock: Clock array
  * @dev: Device
  *
+ * The rates are set: the rail level they need is voted for first, on
+ * platforms that list it.
+ *
  * Return 0 on success or a negative error code otherwise
  */
 int camss_enable_clocks(int nclocks, struct camss_clock *clock,
 			struct device *dev)
 {
+	struct camss *camss = dev_get_drvdata(dev);
+	u32 level = 0;
 	int ret;
 	int i;
+
+	if (camss && camss->res->clock_levels) {
+		for (i = 0; i < nclocks; i++)
+			level = max(level, camss_clock_level(camss, &clock[i]));
+		if (level) {
+			ret = camss_vote_level(camss, clock, level);
+			if (ret)
+				return ret;
+		}
+	}
 
 	for (i = 0; i < nclocks; i++) {
 		ret = clk_prepare_enable(clock[i].clk);
@@ -4596,6 +4710,8 @@ int camss_enable_clocks(int nclocks, struct camss_clock *clock,
 error:
 	for (i--; i >= 0; i--)
 		clk_disable_unprepare(clock[i].clk);
+	if (level)
+		camss_vote_level(camss, clock, 0);
 
 	return ret;
 }
@@ -4604,13 +4720,21 @@ error:
  * camss_disable_clocks - Disable multiple clocks
  * @nclocks: Number of clocks in clock array
  * @clock: Clock array
+ * @dev: Device
+ *
+ * Then drop their rail level vote.
  */
-void camss_disable_clocks(int nclocks, struct camss_clock *clock)
+void camss_disable_clocks(int nclocks, struct camss_clock *clock,
+			  struct device *dev)
 {
+	struct camss *camss = dev_get_drvdata(dev);
 	int i;
 
 	for (i = nclocks - 1; i >= 0; i--)
 		clk_disable_unprepare(clock[i].clk);
+
+	if (camss && camss->res->clock_levels)
+		camss_vote_level(camss, clock, 0);
 }
 
 /*
@@ -5481,6 +5605,7 @@ static int camss_probe(struct platform_device *pdev)
 
 	atomic_set(&camss->ref_count, 0);
 	camss->dev = dev;
+	mutex_init(&camss->level_lock);
 	platform_set_drvdata(pdev, camss);
 
 	camss->csiphy = devm_kcalloc(dev, camss->res->csiphy_num,
@@ -5792,6 +5917,33 @@ static const struct camss_resources sm8250_resources = {
 	.vfe_num = ARRAY_SIZE(vfe_res_8250),
 };
 
+/*
+ * SC8280XP camcc rail levels (MMCX), the same in the Windows PEP clock plan
+ * (qcpep8280.sys) and in the vendor's camcc-direwolf.c. Clocks only ever at
+ * LOW_SVS here are left to camcc's own vote.
+ */
+static const struct camss_clock_level clock_levels_sc8280xp[] = {
+	{ "vfe#", 400000000, RPMH_REGULATOR_LEVEL_LOW_SVS },
+	{ "vfe#", 558000000, RPMH_REGULATOR_LEVEL_SVS },
+	{ "vfe#", 637000000, RPMH_REGULATOR_LEVEL_SVS_L1 },
+	{ "vfe#", 760000000, RPMH_REGULATOR_LEVEL_NOM },
+	{ "vfe_lite#", 320000000, RPMH_REGULATOR_LEVEL_LOW_SVS },
+	{ "vfe_lite#", 400000000, RPMH_REGULATOR_LEVEL_SVS },
+	{ "vfe_lite#", 480000000, RPMH_REGULATOR_LEVEL_SVS_L1 },
+	{ "vfe_lite#", 600000000, RPMH_REGULATOR_LEVEL_NOM },
+	{ "vfe#_csid", 400000000, RPMH_REGULATOR_LEVEL_LOW_SVS },
+	{ "vfe#_csid", 480000000, RPMH_REGULATOR_LEVEL_SVS_L1 },
+	{ "vfe#_csid", 600000000, RPMH_REGULATOR_LEVEL_NOM },
+	{ "vfe_lite#_csid", 400000000, RPMH_REGULATOR_LEVEL_LOW_SVS },
+	{ "vfe_lite#_csid", 480000000, RPMH_REGULATOR_LEVEL_SVS_L1 },
+	{ "vfe_lite#_csid", 600000000, RPMH_REGULATOR_LEVEL_NOM },
+	{ "camnoc_axi", 150000000, RPMH_REGULATOR_LEVEL_LOW_SVS },
+	{ "camnoc_axi", 266666667, RPMH_REGULATOR_LEVEL_SVS },
+	{ "camnoc_axi", 320000000, RPMH_REGULATOR_LEVEL_SVS_L1 },
+	{ "camnoc_axi", 400000000, RPMH_REGULATOR_LEVEL_NOM },
+	{ "camnoc_axi", 480000000, RPMH_REGULATOR_LEVEL_TURBO },
+};
+
 static const struct camss_resources sc8280xp_resources = {
 	.version = CAMSS_8280XP,
 	.pd_name = "top",
@@ -5804,6 +5956,8 @@ static const struct camss_resources sc8280xp_resources = {
 	.csiphy_num = ARRAY_SIZE(csiphy_res_sc8280xp),
 	.csid_num = ARRAY_SIZE(csid_res_sc8280xp),
 	.vfe_num = ARRAY_SIZE(vfe_res_sc8280xp),
+	.clock_levels = clock_levels_sc8280xp,
+	.clock_levels_num = ARRAY_SIZE(clock_levels_sc8280xp),
 };
 
 static const struct camss_resources sc7280_resources = {

@@ -243,7 +243,7 @@ static int csiphy_set_power(struct v4l2_subdev *sd, int on)
 	} else {
 		disable_irq(csiphy->irq);
 
-		camss_disable_clocks(csiphy->nclocks, csiphy->clock);
+		camss_disable_clocks(csiphy->nclocks, csiphy->clock, csiphy->camss->dev);
 
 		regulator_bulk_disable(csiphy->num_supplies, csiphy->supplies);
 

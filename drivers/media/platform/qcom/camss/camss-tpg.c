@@ -180,7 +180,7 @@ static int tpg_set_power(struct v4l2_subdev *sd, int on)
 
 		tpg->res->hw_ops->hw_version(tpg);
 	} else {
-		camss_disable_clocks(tpg->nclocks, tpg->clock);
+		camss_disable_clocks(tpg->nclocks, tpg->clock, tpg->camss->dev);
 
 		pm_runtime_put_sync(dev);
 	}

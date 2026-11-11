@@ -1229,7 +1229,7 @@ int vfe_get(struct vfe_device *vfe)
 	return 0;
 
 error_reset:
-	camss_disable_clocks(vfe->nclocks, vfe->clock);
+	camss_disable_clocks(vfe->nclocks, vfe->clock, vfe->camss->dev);
 
 error_pm_runtime_get:
 	pm_runtime_put_sync(vfe->camss->dev);
@@ -1258,7 +1258,7 @@ void vfe_put(struct vfe_device *vfe)
 			vfe->was_streaming = 0;
 			vfe->res->hw_ops->vfe_halt(vfe);
 		}
-		camss_disable_clocks(vfe->nclocks, vfe->clock);
+		camss_disable_clocks(vfe->nclocks, vfe->clock, vfe->camss->dev);
 		pm_runtime_put_sync(vfe->camss->dev);
 		vfe->res->hw_ops->pm_domain_off(vfe);
 	}

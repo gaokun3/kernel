@@ -728,7 +728,7 @@ static int csid_set_power(struct v4l2_subdev *sd, int on)
 		ret = csid->res->hw_ops->reset(csid);
 		if (ret < 0) {
 			disable_irq(csid->irq);
-			camss_disable_clocks(csid->nclocks, csid->clock);
+			camss_disable_clocks(csid->nclocks, csid->clock, csid->camss->dev);
 			regulator_bulk_disable(csid->num_supplies,
 					       csid->supplies);
 			pm_runtime_put_sync(dev);
@@ -738,7 +738,7 @@ static int csid_set_power(struct v4l2_subdev *sd, int on)
 		csid->res->hw_ops->hw_version(csid);
 	} else {
 		disable_irq(csid->irq);
-		camss_disable_clocks(csid->nclocks, csid->clock);
+		camss_disable_clocks(csid->nclocks, csid->clock, csid->camss->dev);
 		regulator_bulk_disable(csid->num_supplies,
 				       csid->supplies);
 		pm_runtime_put_sync(dev);

@@ -341,7 +341,8 @@ static int ispif_reset(struct ispif_device *ispif, u8 vfe_id)
 	if (ret)
 		dev_dbg(camss->dev, "ISPIF Reset failed\n");
 
-	camss_disable_clocks(ispif->nclocks_for_reset, ispif->clock_for_reset);
+	camss_disable_clocks(ispif->nclocks_for_reset, ispif->clock_for_reset,
+			     ispif->camss->dev);
 
 	camss_pm_domain_off(camss, PM_DOMAIN_VFE0);
 	camss_pm_domain_off(camss, PM_DOMAIN_VFE1);
@@ -385,7 +386,7 @@ static int ispif_set_power(struct v4l2_subdev *sd, int on)
 		ret = ispif_reset(ispif, line->vfe_id);
 		if (ret < 0) {
 			pm_runtime_put_sync(dev);
-			camss_disable_clocks(ispif->nclocks, ispif->clock);
+			camss_disable_clocks(ispif->nclocks, ispif->clock, ispif->camss->dev);
 			goto exit;
 		}
 
@@ -398,7 +399,7 @@ static int ispif_set_power(struct v4l2_subdev *sd, int on)
 			dev_err(dev, "ispif power off on power_count == 0\n");
 			goto exit;
 		} else if (ispif->power_count == 1) {
-			camss_disable_clocks(ispif->nclocks, ispif->clock);
+			camss_disable_clocks(ispif->nclocks, ispif->clock, ispif->camss->dev);
 			pm_runtime_put_sync(dev);
 		}
 
