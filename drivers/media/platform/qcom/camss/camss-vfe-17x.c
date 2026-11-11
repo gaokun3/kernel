@@ -2330,15 +2330,16 @@ void vfe17x_disp_stop(struct vfe_pix_disp *disp)
 }
 
 /*
- * Master's output lock held: number a display buffer done at @ts by the
- * epochs, like the image path's (vfe_isr_wm_done()).
+ * Master's output lock held: number and stamp a display buffer by the epochs,
+ * like the image path's (vfe_isr_wm_done()); @ts, its completion time, only
+ * when the pixel path does not run.
  */
 static void vfe_disp_number(struct vfe_device *master, struct vfe_pix_disp *disp,
 			    struct camss_buffer *buf, u64 ts)
 {
 	buf->vb.vb2_buf.timestamp = ts;
 	buf->vb.sequence = disp->output.sequence++;
-	vfe17x_meta_sequence(master, &buf->vb.sequence);
+	vfe17x_meta_frame(master, &buf->vb.sequence, &buf->vb.vb2_buf.timestamp);
 }
 
 /*
@@ -2548,6 +2549,7 @@ out_unlock:
 static irqreturn_t vfe_isr(int irq, void *dev)
 {
 	struct vfe_device *vfe = dev;
+	u64 now = ktime_get_ns();
 	u32 status0, status1, vfe_bus_status[3];
 	int i, wm;
 
@@ -2623,7 +2625,7 @@ static irqreturn_t vfe_isr(int irq, void *dev)
 	if (status0 & STATUS_0_CAMIF_EPOCH0) {
 		bool next_written = vfe17x_epoch_refill(vfe);
 
-		if (vfe17x_meta_epoch(vfe, next_written)) {
+		if (vfe17x_meta_epoch(vfe, next_written, now)) {
 			spin_lock(&vfe->output_lock);
 			vfe_reg_update(vfe, VFE_LINE_PIX);
 			spin_unlock(&vfe->output_lock);
@@ -2901,9 +2903,9 @@ static void vfe_isr_wm_done(struct vfe_device *vfe, u8 wm)
 	/*
 	 * While the pixel path runs, the RDI lines of the same VFE number
 	 * their frames by its epochs too, so that RAW and processed buffers of
-	 * one sensor frame carry the same sequence.
+	 * one sensor frame carry the same sequence and timestamp.
 	 */
-	vfe17x_meta_sequence(vfe, &ready_buf->vb.sequence);
+	vfe17x_meta_frame(vfe, &ready_buf->vb.sequence, &ready_buf->vb.vb2_buf.timestamp);
 	bad = output->error;
 	output->error = false;
 
