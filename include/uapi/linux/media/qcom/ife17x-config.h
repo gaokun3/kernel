@@ -32,6 +32,7 @@
  * @IFE17X_PARAMS_BLOCK_PDPC: phase detection pixel correction (PDPC11)
  * @IFE17X_PARAMS_BLOCK_BF: focus statistics (BFStats23)
  * @IFE17X_PARAMS_BLOCK_ABF: adaptive Bayer filter (ABF34)
+ * @IFE17X_PARAMS_BLOCK_BPC: bad pixel and bad cluster correction (BPCBCC50)
  */
 enum ife17x_params_block_type {
 	IFE17X_PARAMS_BLOCK_BLS,
@@ -42,6 +43,7 @@ enum ife17x_params_block_type {
 	IFE17X_PARAMS_BLOCK_PDPC,
 	IFE17X_PARAMS_BLOCK_BF,
 	IFE17X_PARAMS_BLOCK_ABF,
+	IFE17X_PARAMS_BLOCK_BPC,
 };
 
 /**
@@ -360,6 +362,43 @@ struct ife17x_params_abf {
 	__u8 reserved[5];
 } __attribute__((aligned(8)));
 
+#define IFE17X_BPC_FL_HOT_OFF		(1U << 0)
+#define IFE17X_BPC_FL_COLD_OFF		(1U << 1)
+#define IFE17X_BPC_FL_SAME_CHANNEL	(1U << 2)
+
+/**
+ * struct ife17x_params_bpc - bad pixel and bad cluster correction
+ * @header: block header, type IFE17X_PARAMS_BLOCK_BPC
+ * @wb_ratio: white balance gain ratios R/G, B/G, G/R and G/B in unsigned Q12,
+ *	      at most 0x1ffff, to compare neighbours of other colours
+ * @flags: IFE17X_BPC_FL_HOT_OFF and IFE17X_BPC_FL_COLD_OFF leave hot and cold
+ *	   pixels; IFE17X_BPC_FL_SAME_CHANNEL compares neighbours of the same
+ *	   colour only
+ * @black_level: black level still in the data, 14 bit pipeline units like
+ *		 struct ife17x_params_bls, at most 4095
+ * @bpc_offset: offset for single bad pixels, at most 0x7fff
+ * @bcc_offset: offset for bad clusters, at most 0x7fff
+ * @threshold: correction threshold, at most 8191
+ * @fmax: upper limit of a pixel against its neighbours, unsigned Q6, 64..127
+ * @fmin: lower limit, unsigned Q6, at most 64
+ * @reserved: must be zero
+ *
+ * The field meanings are those of the Windows driver, where it names them; the
+ * flag names are inferred. V4L2_ISP_PARAMS_FL_BLOCK_DISABLE bypasses the block.
+ */
+struct ife17x_params_bpc {
+	struct v4l2_isp_params_block_header header;
+	__u32 wb_ratio[4];
+	__u16 flags;
+	__u16 black_level;
+	__u16 bpc_offset;
+	__u16 bcc_offset;
+	__u16 threshold;
+	__u8 fmax;
+	__u8 fmin;
+	__u32 reserved;
+} __attribute__((aligned(8)));
+
 #define IFE17X_PARAMS_MAX_SIZE					\
 	(sizeof(struct ife17x_params_bls) +			\
 	 sizeof(struct ife17x_params_wb) +			\
@@ -368,7 +407,8 @@ struct ife17x_params_abf {
 	 sizeof(struct ife17x_params_awb_bg) +			\
 	 sizeof(struct ife17x_params_pdpc) +			\
 	 sizeof(struct ife17x_params_bf) +			\
-	 sizeof(struct ife17x_params_abf))
+	 sizeof(struct ife17x_params_abf) +			\
+	 sizeof(struct ife17x_params_bpc))
 
 /**
  * struct ife17x_awb_bg_region - AWB Bayer grid record, as the hardware

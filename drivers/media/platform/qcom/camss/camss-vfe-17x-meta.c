@@ -35,6 +35,7 @@
 
 /* Module enables, double buffered */
 #define VFE_MODULE_LENS_EN		0x040
+#define		LENS_EN_BPC		BIT(6)
 #define		LENS_EN_ABF		BIT(7)
 #define		LENS_EN_BLS		BIT(11)
 #define		LENS_EN_PDPC		BIT(13)
@@ -56,6 +57,13 @@
  */
 #define		CAMIF_EPOCH0_LINE	20
 #define		CAMIF_EPOCH_CFG(height)	(CAMIF_EPOCH0_LINE << 16 | ((height) * 3 / 4))
+
+/* BPCBCC50, from the Windows driver: 0x5c4..0x5e0 */
+#define VFE_BPC_CFG			0x5c4	/* flags [2:0], black level [14:3] */
+#define VFE_BPC_WB_RATIO(i)		(0x5c8 + (i) * 4)	/* R/G, B/G, G/R, G/B */
+#define VFE_BPC_OFFSET			0x5d8	/* single [14:0], cluster [30:16] */
+#define VFE_BPC_LIMITS			0x5dc	/* fmax [6:0], fmin [14:8], threshold [28:16] */
+#define VFE_BPC_STATS			0x5e0
 
 /*
  * ABF34, from the Windows driver: 0x5e8 configuration, 0x5f4..0x648 the rest,
@@ -328,6 +336,7 @@ union ife_params_block {
 	const struct ife17x_params_pdpc *pdpc;
 	const struct ife17x_params_bf *bf;
 	const struct ife17x_params_abf *abf;
+	const struct ife17x_params_bpc *bpc;
 	const u8 *data;
 };
 
@@ -789,6 +798,29 @@ static void ife_params_abf(struct vfe_pix_meta *meta, union ife_params_block blo
 	vfe_rmw(vfe, VFE_MODULE_LENS_EN, 0, LENS_EN_ABF);
 }
 
+/* Bad pixel and bad cluster correction: the same values for both IFEs */
+static void ife_params_bpc(struct vfe_pix_meta *meta, union ife_params_block block)
+{
+	const struct ife17x_params_bpc *bpc = block.bpc;
+	struct vfe_device *vfe = meta->vfe;
+	unsigned int i;
+
+	if (ife_block_disabled(block)) {
+		vfe_rmw(vfe, VFE_MODULE_LENS_EN, LENS_EN_BPC, 0);
+		return;
+	}
+
+	writel_relaxed(bpc->flags | bpc->black_level << 3, vfe->base + VFE_BPC_CFG);
+	for (i = 0; i < 4; i++)
+		writel_relaxed(bpc->wb_ratio[i], vfe->base + VFE_BPC_WB_RATIO(i));
+	writel_relaxed(bpc->bpc_offset | bpc->bcc_offset << 16, vfe->base + VFE_BPC_OFFSET);
+	writel_relaxed(bpc->fmax | bpc->fmin << 8 | bpc->threshold << 16,
+		       vfe->base + VFE_BPC_LIMITS);
+	/* The Windows driver writes the statistics register with zero */
+	writel_relaxed(0, vfe->base + VFE_BPC_STATS);
+	vfe_rmw(vfe, VFE_MODULE_LENS_EN, 0, LENS_EN_BPC);
+}
+
 static const ife_params_handler ife_params_handlers[] = {
 	[IFE17X_PARAMS_BLOCK_BLS] = ife_params_bls,
 	[IFE17X_PARAMS_BLOCK_WB] = ife_params_wb,
@@ -798,6 +830,7 @@ static const ife_params_handler ife_params_handlers[] = {
 	[IFE17X_PARAMS_BLOCK_PDPC] = ife_params_pdpc,
 	[IFE17X_PARAMS_BLOCK_BF] = ife_params_bf,
 	[IFE17X_PARAMS_BLOCK_ABF] = ife_params_abf,
+	[IFE17X_PARAMS_BLOCK_BPC] = ife_params_bpc,
 };
 
 static const struct v4l2_isp_params_block_type_info ife_params_block_types[] = {
@@ -809,6 +842,7 @@ static const struct v4l2_isp_params_block_type_info ife_params_block_types[] = {
 	[IFE17X_PARAMS_BLOCK_PDPC] = { .size = sizeof(struct ife17x_params_pdpc) },
 	[IFE17X_PARAMS_BLOCK_BF] = { .size = sizeof(struct ife17x_params_bf) },
 	[IFE17X_PARAMS_BLOCK_ABF] = { .size = sizeof(struct ife17x_params_abf) },
+	[IFE17X_PARAMS_BLOCK_BPC] = { .size = sizeof(struct ife17x_params_bpc) },
 };
 
 static_assert(ARRAY_SIZE(ife_params_handlers) == ARRAY_SIZE(ife_params_block_types));
@@ -1809,6 +1843,18 @@ static int ife_params_check(struct device *dev, union ife_params_block block)
 		return ife_bf_check(dev, block.bf);
 	case IFE17X_PARAMS_BLOCK_ABF:
 		return ife_abf_check(dev, block.abf);
+	case IFE17X_PARAMS_BLOCK_BPC:
+		for (i = 0; i < 4; i++)
+			if (block.bpc->wb_ratio[i] > 0x1ffff)
+				goto invalid;
+		if (block.bpc->flags & ~(IFE17X_BPC_FL_HOT_OFF | IFE17X_BPC_FL_COLD_OFF |
+					 IFE17X_BPC_FL_SAME_CHANNEL) ||
+		    block.bpc->black_level > 4095 || block.bpc->bpc_offset > 0x7fff ||
+		    block.bpc->bcc_offset > 0x7fff || block.bpc->threshold > 8191 ||
+		    block.bpc->fmax < 64 || block.bpc->fmax > 127 || block.bpc->fmin > 64 ||
+		    block.bpc->reserved)
+			goto invalid;
+		break;
 	}
 	return 0;
 
