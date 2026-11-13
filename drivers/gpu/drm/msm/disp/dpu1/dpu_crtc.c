@@ -43,7 +43,7 @@
 #define DPU_CRTC_FRAME_DONE_TIMEOUT_MS	60
 
 static bool panel_calibration = true;
-MODULE_PARM_DESC(panel_calibration, "Apply the factory calibration of the built-in panel");
+MODULE_PARM_DESC(panel_calibration, "Apply the factory sRGB calibration of the built-in panel");
 module_param(panel_calibration, bool, 0644);
 
 static struct dpu_kms *_dpu_crtc_get_kms(struct drm_crtc *crtc)
@@ -792,30 +792,27 @@ static int _dpu_crtc_check_and_setup_lm_bounds(struct drm_crtc *crtc,
 	return 0;
 }
 
-/*
- * The 3D LUT bank of the factory calibration for this commit: sRGB for the
- * BT709_YCC colorspace, Display P3 for DCI-P3_RGB_D65 and for the default
- * colorspace, which shows content as P3 over the panel's near-P3 gamut.
- * -1 when the panel has no usable calibration or it is turned off.
- */
-static int _dpu_crtc_panel_bank(struct drm_crtc_state *state)
+static bool _dpu_crtc_has_panel_cal(struct drm_crtc_state *state)
 {
 	struct drm_crtc *crtc = state->crtc;
 	struct dpu_kms *dpu_kms = _dpu_crtc_get_kms(crtc);
-	struct drm_connector *connector = dpu_kms->panel_connector;
 	struct drm_encoder *encoder;
 
-	if (!dpu_kms->has_panel_cal || !READ_ONCE(panel_calibration))
-		return -1;
+	if (!dpu_kms->has_panel_cal)
+		return false;
 
 	drm_for_each_encoder_mask(encoder, crtc->dev, state->encoder_mask) {
-		if (encoder->encoder_type != DRM_MODE_ENCODER_DSI)
-			continue;
-		if (connector &&
-		    connector->state->colorspace == DRM_MODE_COLORIMETRY_BT709_YCC)
-			return DPU_PANEL_CAL_SRGB;
-		return DPU_PANEL_CAL_P3;
+		if (encoder->encoder_type == DRM_MODE_ENCODER_DSI)
+			return true;
 	}
+
+	return false;
+}
+
+static int _dpu_crtc_panel_bank(struct drm_crtc_state *state)
+{
+	if (_dpu_crtc_has_panel_cal(state) && READ_ONCE(panel_calibration))
+		return DPU_PANEL_CAL_SRGB;
 
 	return -1;
 }
@@ -911,19 +908,12 @@ static void _dpu_crtc_setup_cp_blocks(struct drm_crtc *crtc)
 		if (!dspp)
 			continue;
 
-		/*
-		 * Both banks stay loaded, so switching gamut is one opmode write.
-		 * A modeset may bring DSPPs that lost power; one that turns the
-		 * CRTC off gets the LUTs at the next enable instead.
-		 */
 		if (dspp->ops.select_gamut && state->active) {
 			if (modeset)
 				dspp->gamut_loaded = false;
 			if (bank >= 0 && !dspp->gamut_loaded) {
 				dspp->ops.load_gamut(dspp, DPU_PANEL_CAL_SRGB,
 					&dpu_kms->panel_lut[DPU_PANEL_CAL_SRGB]);
-				dspp->ops.load_gamut(dspp, DPU_PANEL_CAL_P3,
-					&dpu_kms->panel_lut[DPU_PANEL_CAL_P3]);
 				dspp->gamut_loaded = true;
 			}
 			dspp->ops.select_gamut(dspp, bank);
@@ -1490,7 +1480,8 @@ static struct msm_display_topology dpu_crtc_get_topology(
 	else
 		topology.num_lm = 1;
 
-	if (crtc_state->ctm || crtc_state->gamma_lut)
+	if (crtc_state->ctm || crtc_state->gamma_lut ||
+	    _dpu_crtc_has_panel_cal(crtc_state))
 		topology.num_dspp = topology.num_lm;
 
 	return topology;

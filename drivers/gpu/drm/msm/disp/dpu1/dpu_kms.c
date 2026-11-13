@@ -1136,29 +1136,6 @@ unsigned long dpu_kms_get_clk_rate(struct dpu_kms *dpu_kms, char *clock_name)
 
 #define	DPU_PERF_DEFAULT_MAX_CORE_CLK_RATE	412500000
 
-/*
- * With a factory calibration the panel can show either gamut accurately, so
- * let userspace pick one through the colorspace property.
- */
-static void _dpu_kms_attach_panel_colorspace(struct dpu_kms *dpu_kms)
-{
-	struct drm_connector_list_iter iter;
-	struct drm_connector *connector;
-
-	drm_connector_list_iter_begin(dpu_kms->dev, &iter);
-	drm_for_each_connector_iter(connector, &iter) {
-		if (connector->connector_type != DRM_MODE_CONNECTOR_DSI)
-			continue;
-		if (!drm_mode_create_hdmi_colorspace_property(connector,
-				BIT(DRM_MODE_COLORIMETRY_BT709_YCC) |
-				BIT(DRM_MODE_COLORIMETRY_DCI_P3_RGB_D65)) &&
-		    !drm_connector_attach_colorspace_property(connector))
-			dpu_kms->panel_connector = connector;
-		break;
-	}
-	drm_connector_list_iter_end(&iter);
-}
-
 static int dpu_kms_hw_init(struct msm_kms *kms)
 {
 	struct dpu_kms *dpu_kms;
@@ -1309,9 +1286,6 @@ static int dpu_kms_hw_init(struct msm_kms *kms)
 		DPU_ERROR("modeset init failed: %d\n", rc);
 		goto err_pm_put;
 	}
-
-	if (dpu_kms->has_panel_cal)
-		_dpu_kms_attach_panel_colorspace(dpu_kms);
 
 	dpu_vbif_init_memtypes(dpu_kms);
 

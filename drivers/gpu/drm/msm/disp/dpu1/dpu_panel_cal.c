@@ -8,8 +8,7 @@
  * and the table can be reached from the EFI configuration table.
  *
  * Each record is a 17x17x17 LUT for one gamut. The DSPP 3D LUT has 13 points
- * per axis in the mode that keeps two banks, so resample both and load them
- * once: the panel then switches between sRGB and Display P3 per frame.
+ * per axis in the mode that keeps two banks.
  */
 
 #define pr_fmt(fmt)	"[drm:%s:%d] " fmt, __func__, __LINE__
