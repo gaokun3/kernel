@@ -1192,7 +1192,7 @@
 	status = "okay";
 
 	panel: panel@0 {
-		compatible = "csot,ppc357db1-4", "himax,hx83121a";
+		compatible = "boe,ppc357db1-4", "himax,hx83121a";
 		reg = <0>;
 
 		pinctrl-0 = <&disp_reset_n>, <&mdp_vsync_active>;
